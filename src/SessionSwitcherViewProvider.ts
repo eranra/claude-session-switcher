@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFile } from 'child_process';
 import { randomBytes } from 'crypto';
-import { SessionManager, ClaudeSession, getActiveSessionIds, readActiveLockFiles, getIPCSocketForPid } from './SessionManager';
+import { SessionManager, ClaudeSession, MessageExchange, getActiveSessionIds, readActiveLockFiles, getIPCSocketForPid } from './SessionManager';
 
 function getNonce(): string {
   return randomBytes(16).toString('hex');
@@ -59,7 +59,7 @@ export class SessionSwitcherViewProvider implements vscode.WebviewViewProvider, 
     );
 
     this._viewDisposables.push(
-      webviewView.webview.onDidReceiveMessage(message => {
+      webviewView.webview.onDidReceiveMessage(async message => {
         switch (message.type) {
           case 'switchSession': {
             const sessionId = message.sessionId as string | undefined;
@@ -100,6 +100,19 @@ export class SessionSwitcherViewProvider implements vscode.WebviewViewProvider, 
           }
           case 'ready': {
             void this._pushSessions();
+            break;
+          }
+          case 'getSessionPreview': {
+            const sessionId = message.sessionId as string | undefined;
+            if (!sessionId || !this._view) { break; }
+            const exchanges: MessageExchange[] = await this._sessionManager.getRecentExchanges(sessionId);
+            const session = this._sessionManager.getSessions().find(s => s.sessionId === sessionId);
+            void this._view.webview.postMessage({
+              type: 'sessionPreview',
+              sessionId,
+              projectPath: session?.projectPath ?? '',
+              exchanges,
+            });
             break;
           }
         }
@@ -327,6 +340,7 @@ export class SessionSwitcherViewProvider implements vscode.WebviewViewProvider, 
     <button id="history-toggle" aria-expanded="false">History &#x25B6;</button>
     <div id="history-panel" hidden></div>
   </div>
+  <div id="session-preview" hidden></div>
   <script nonce="${nonce}" src="${mainScriptUri}"></script>
 </body>
 </html>`;
