@@ -251,3 +251,131 @@ describe('SessionManager._parseSessionFile', () => {
     });
   });
 });
+
+describe('SessionManager.getRecentExchanges', () => {
+  let tmpDir: string;
+  let sm: SessionManager;
+
+  beforeEach(async () => {
+    tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sm-preview-'));
+    sm = new SessionManager(makeContext());
+    (sm as unknown as { _projectsDir: string })._projectsDir = tmpDir;
+  });
+
+  afterEach(async () => {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function seedPath(sessionId: string, filePath: string) {
+    (sm as unknown as { _sessionFilePaths: Map<string, string> })
+      ._sessionFilePaths.set(sessionId, filePath);
+  }
+
+  it('returns [] for an unknown session id', async () => {
+    const result = await sm.getRecentExchanges('does-not-exist');
+    expect(result).toEqual([]);
+  });
+
+  it('returns user and assistant exchanges in chronological order', async () => {
+    const id = 'preview-order';
+    const file = await writeTempJsonl(tmpDir, id, [
+      { type: 'user', message: { content: 'First question' }, timestamp: '2024-01-01T00:00:00.000Z' },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'First answer' }] }, timestamp: '2024-01-01T00:00:01.000Z' },
+      { type: 'user', message: { content: 'Second question' }, timestamp: '2024-01-01T00:00:02.000Z' },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Second answer' }] }, timestamp: '2024-01-01T00:00:03.000Z' },
+    ]);
+    seedPath(id, file);
+    const result = await sm.getRecentExchanges(id);
+    expect(result).toHaveLength(4);
+    expect(result[0]).toMatchObject({ role: 'user', text: 'First question', timestamp: '2024-01-01T00:00:00.000Z' });
+    expect(result[1]).toMatchObject({ role: 'assistant', text: 'First answer' });
+    expect(result[2]).toMatchObject({ role: 'user', text: 'Second question' });
+    expect(result[3]).toMatchObject({ role: 'assistant', text: 'Second answer' });
+  });
+
+  it('returns at most 6 records (3 user + 3 assistant)', async () => {
+    const id = 'preview-cap';
+    const lines = [];
+    for (let i = 0; i < 5; i++) {
+      lines.push({ type: 'user', message: { content: `Question ${i}` } });
+      lines.push({ type: 'assistant', message: { content: [{ type: 'text', text: `Answer ${i}` }] } });
+    }
+    const file = await writeTempJsonl(tmpDir, id, lines);
+    seedPath(id, file);
+    const result = await sm.getRecentExchanges(id);
+    expect(result).toHaveLength(6);
+    expect(result[0]).toMatchObject({ role: 'user', text: 'Question 2' });
+  });
+
+  it('skips tool_use and tool_result records', async () => {
+    const id = 'preview-skip-tools';
+    const file = await writeTempJsonl(tmpDir, id, [
+      { type: 'user', message: { content: 'Run a command' } },
+      { type: 'tool_use', id: 't1', name: 'bash', input: {} },
+      { type: 'tool_result', tool_use_id: 't1', content: 'output' },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Done!' }] } },
+    ]);
+    seedPath(id, file);
+    const result = await sm.getRecentExchanges(id);
+    expect(result).toHaveLength(2);
+    expect(result.every(r => r.role === 'user' || r.role === 'assistant')).toBe(true);
+  });
+
+  it('skips assistant records that contain only tool_use blocks (no text)', async () => {
+    const id = 'preview-skip-tool-only-assistant';
+    const file = await writeTempJsonl(tmpDir, id, [
+      { type: 'user', message: { content: 'Do something' } },
+      { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'bash', input: {} }] } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'All done.' }] } },
+    ]);
+    seedPath(id, file);
+    const result = await sm.getRecentExchanges(id);
+    expect(result).toHaveLength(2);
+    expect(result[1]).toMatchObject({ role: 'assistant', text: 'All done.' });
+  });
+
+  it('truncates user text longer than 150 chars', async () => {
+    const id = 'preview-trunc-user';
+    const longText = 'U'.repeat(200);
+    const file = await writeTempJsonl(tmpDir, id, [
+      { type: 'user', message: { content: longText } },
+    ]);
+    seedPath(id, file);
+    const result = await sm.getRecentExchanges(id);
+    expect(result[0].text).toBe('U'.repeat(150) + '…');
+  });
+
+  it('truncates assistant text longer than 250 chars', async () => {
+    const id = 'preview-trunc-assistant';
+    const longText = 'A'.repeat(300);
+    const file = await writeTempJsonl(tmpDir, id, [
+      { type: 'user', message: { content: 'ask' } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: longText }] } },
+    ]);
+    seedPath(id, file);
+    const result = await sm.getRecentExchanges(id);
+    const assistantEntry = result.find(r => r.role === 'assistant');
+    expect(assistantEntry?.text).toBe('A'.repeat(250) + '…');
+  });
+
+  it('handles assistant with plain string content (not array)', async () => {
+    const id = 'preview-string-assistant';
+    const file = await writeTempJsonl(tmpDir, id, [
+      { type: 'user', message: { content: 'Hello' } },
+      { type: 'assistant', message: { content: 'Hi there' } },
+    ]);
+    seedPath(id, file);
+    const result = await sm.getRecentExchanges(id);
+    expect(result.find(r => r.role === 'assistant')?.text).toBe('Hi there');
+  });
+
+  it('omits timestamp when not present in the record', async () => {
+    const id = 'preview-no-ts';
+    const file = await writeTempJsonl(tmpDir, id, [
+      { type: 'user', message: { content: 'No timestamp here' } },
+    ]);
+    seedPath(id, file);
+    const result = await sm.getRecentExchanges(id);
+    expect(result[0].timestamp).toBeUndefined();
+  });
+});

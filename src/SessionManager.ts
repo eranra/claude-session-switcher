@@ -3,6 +3,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+export interface MessageExchange {
+  role: 'user' | 'assistant';
+  text: string;
+  timestamp?: string;
+}
+
 export interface ClaudeSession {
   sessionId: string;    // UUID from filename (e.g. "d61ee3f8-38ea-4316-8b4e-c90a8dd2e45e")
   projectName: string;  // last path segment of cwd (e.g. "my-project")
@@ -20,6 +26,7 @@ interface JsonlRecord {
   type?: string;
   cwd?: string;
   aiTitle?: string;     // present in ai-title records written by Claude Code
+  timestamp?: string;
   message?: {
     content?: string | ContentBlock[];
   };
@@ -85,6 +92,7 @@ export class SessionManager implements vscode.Disposable {
   readonly onDidChangeSessions: vscode.Event<ClaudeSession[]> = this._onDidChangeSessions.event;
 
   private _sessions: ClaudeSession[] = [];
+  private _sessionFilePaths = new Map<string, string>();
   private readonly _watcher: vscode.FileSystemWatcher;
   private readonly _projectsDir: string;
   private _debounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -131,6 +139,84 @@ export class SessionManager implements vscode.Disposable {
     return [...this._sessions];
   }
 
+  async getRecentExchanges(sessionId: string): Promise<MessageExchange[]> {
+    const filePath = this._sessionFilePaths.get(sessionId);
+    if (!filePath) { return []; }
+
+    let stat: { size: number };
+    try {
+      stat = await fs.promises.stat(filePath);
+    } catch {
+      return [];
+    }
+
+    const TAIL = 32768;
+    const offset = Math.max(0, stat.size - TAIL);
+    const size = stat.size - offset;
+    const buf = Buffer.alloc(size);
+
+    const fh = await fs.promises.open(filePath, 'r');
+    try {
+      const { bytesRead } = await fh.read(buf, 0, size, offset);
+      const chunk = buf.subarray(0, bytesRead).toString('utf8');
+      const lines = chunk.split('\n');
+      const collected: MessageExchange[] = [];
+
+      for (let i = lines.length - 1; i >= 0 && collected.length < 6; i--) {
+        const trimmed = lines[i].trim();
+        if (!trimmed) { continue; }
+        try {
+          const record = JSON.parse(trimmed) as JsonlRecord;
+
+          if (record.type === 'user') {
+            const content = record.message?.content;
+            let text: string | null = null;
+            if (typeof content === 'string' && content.trim().length > 0) {
+              text = content.trim();
+            } else if (Array.isArray(content)) {
+              for (const block of content) {
+                const b = block as { type?: string; text?: string };
+                if (b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0) {
+                  text = b.text.trim();
+                  break;
+                }
+              }
+            }
+            if (text !== null) {
+              const truncated = text.length > 150 ? text.slice(0, 150) + '…' : text;
+              collected.push({ role: 'user', text: truncated, timestamp: record.timestamp });
+            }
+
+          } else if (record.type === 'assistant') {
+            const content = record.message?.content;
+            let text: string | null = null;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                const b = block as { type?: string; text?: string };
+                if (b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0) {
+                  text = b.text.trim();
+                  break;
+                }
+              }
+            } else if (typeof content === 'string' && content.trim().length > 0) {
+              text = content.trim();
+            }
+            if (text !== null) {
+              const truncated = text.length > 250 ? text.slice(0, 250) + '…' : text;
+              collected.push({ role: 'assistant', text: truncated, timestamp: record.timestamp });
+            }
+          }
+        } catch {
+          // Malformed line — skip
+        }
+      }
+
+      return collected.reverse();
+    } finally {
+      await fh.close();
+    }
+  }
+
   dispose(): void {
     if (this._debounceTimer !== undefined) {
       clearTimeout(this._debounceTimer);
@@ -151,6 +237,7 @@ export class SessionManager implements vscode.Disposable {
 
   private async _scanSessions(): Promise<ClaudeSession[]> {
     const sessions: ClaudeSession[] = [];
+    this._sessionFilePaths.clear();
 
     const jsonlFiles = await this._findJsonlFiles(this._projectsDir);
     for (const filePath of jsonlFiles) {
@@ -276,6 +363,7 @@ export class SessionManager implements vscode.Disposable {
       const title = (aiTitle ?? firstUserText).slice(0, 60);
       const projectName = projectPath ? path.basename(projectPath) : '';
       const status = await this._readStatus(fh, stat.size, updatedAt);
+      this._sessionFilePaths.set(sessionId, filePath);
       return { sessionId, projectName, projectPath, title, updatedAt, status };
     } finally {
       await fh.close();
