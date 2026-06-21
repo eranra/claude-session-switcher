@@ -304,3 +304,71 @@ button:focus-visible {
   margin-top: 1px;
 }
 
+/* ── Session Preview Card ───────────────────────────────────────────────── */
+
+#session-preview {
+  position: fixed;
+  z-index: 100;
+  width: calc(100vw - 8px);
+  max-width: 320px;
+  background-color: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-tab-border, #444));
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  padding: 8px 0;
+  pointer-events: none;
+}
+
+.preview-path {
+  padding: 2px 10px 6px;
+  font-size: 10px;
+  opacity: 0.55;
+  word-break: break-all;
+  border-bottom: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-tab-border, #444));
+  margin-bottom: 4px;
+}
+
+.preview-exchange {
+  padding: 4px 10px;
+}
+
+.preview-exchange + .preview-exchange {
+  border-top: 1px solid var(--vscode-list-inactiveFocusOutline, rgba(128, 128, 128, 0.15));
+  margin-top: 4px;
+  padding-top: 4px;
+}
+
+.preview-meta {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin-bottom: 2px;
+}
+
+.preview-role {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.preview-role-user {
+  color: var(--vscode-charts-blue, #4fc1ff);
+}
+
+.preview-role-assistant {
+  color: var(--vscode-charts-green, #4caf50);
+}
+
+.preview-time {
+  font-size: 10px;
+  opacity: 0.55;
+}
+
+.preview-text {
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+

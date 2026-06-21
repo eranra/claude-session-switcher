@@ -16,11 +16,15 @@
 
   let historyOpen = false;
 
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let previewTimer = null;
+
   // ── DOM References ────────────────────────────────────────────────────────
 
   let tabStrip;
   let historyToggle;
   let historyPanel;
+  let previewEl;
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -41,6 +45,75 @@
     if (diffHr  < 24)  { return diffHr  === 1 ? '1 hour ago'   : `${diffHr} hours ago`; }
     if (diffDay < 30)  { return diffDay === 1 ? '1 day ago'    : `${diffDay} days ago`; }
     return new Date(isoString).toLocaleDateString();
+  }
+
+  /**
+   * @param {string} projectPath
+   * @param {Array<{role: string, text: string, timestamp?: string}>} exchanges
+   * @param {HTMLElement} anchorEl
+   */
+  function showPreview(projectPath, exchanges, anchorEl) {
+    if (!previewEl) { return; }
+
+    previewEl.innerHTML = '';
+
+    if (projectPath) {
+      const pathEl = document.createElement('div');
+      pathEl.className = 'preview-path';
+      pathEl.textContent = projectPath;
+      previewEl.appendChild(pathEl);
+    }
+
+    exchanges.forEach(function (exchange) {
+      const exchangeEl = document.createElement('div');
+      exchangeEl.className = 'preview-exchange';
+
+      const metaEl = document.createElement('div');
+      metaEl.className = 'preview-meta';
+
+      const roleEl = document.createElement('span');
+      roleEl.className = 'preview-role ' +
+        (exchange.role === 'user' ? 'preview-role-user' : 'preview-role-assistant');
+      roleEl.textContent = exchange.role === 'user' ? 'You' : 'Claude';
+      metaEl.appendChild(roleEl);
+
+      if (exchange.timestamp) {
+        const timeEl = document.createElement('span');
+        timeEl.className = 'preview-time';
+        timeEl.textContent = formatRelativeTime(exchange.timestamp);
+        metaEl.appendChild(timeEl);
+      }
+
+      const textEl = document.createElement('div');
+      textEl.className = 'preview-text';
+      textEl.textContent = exchange.text;
+
+      exchangeEl.appendChild(metaEl);
+      exchangeEl.appendChild(textEl);
+      previewEl.appendChild(exchangeEl);
+    });
+
+    // Measure off-screen before placing
+    previewEl.style.top = '-9999px';
+    previewEl.style.left = '-9999px';
+    previewEl.hidden = false;
+
+    const rect = anchorEl.getBoundingClientRect();
+    const cardHeight = previewEl.offsetHeight;
+    const spaceBelow = window.innerHeight - rect.bottom;
+
+    previewEl.style.left = rect.left + 'px';
+    if (spaceBelow >= cardHeight + 4) {
+      previewEl.style.top = (rect.bottom + 4) + 'px';
+    } else {
+      previewEl.style.top = Math.max(4, rect.top - cardHeight - 4) + 'px';
+    }
+  }
+
+  function hidePreview() {
+    if (!previewEl) { return; }
+    previewEl.hidden = true;
+    previewEl.innerHTML = '';
   }
 
   // ── Tab builder ───────────────────────────────────────────────────────────
@@ -101,6 +174,17 @@
         event.preventDefault();
         vscodeApi.postMessage({ type: 'switchSession', sessionId: session.sessionId });
       }
+    });
+
+    tab.addEventListener('mouseenter', function () {
+      previewTimer = setTimeout(function () {
+        vscodeApi.postMessage({ type: 'getSessionPreview', sessionId: session.sessionId });
+      }, 250);
+    });
+
+    tab.addEventListener('mouseleave', function () {
+      clearTimeout(previewTimer);
+      hidePreview();
     });
 
     return tab;
@@ -210,6 +294,14 @@
         historySessions = Array.isArray(message.sessions) ? message.sessions : [];
         renderHistory();
         break;
+      case 'sessionPreview': {
+        const tabEl = tabStrip &&
+          tabStrip.querySelector('[data-session-id="' + message.sessionId + '"]');
+        if (tabEl && tabEl.matches(':hover')) {
+          showPreview(message.projectPath || '', message.exchanges || [], tabEl);
+        }
+        break;
+      }
     }
   });
 
@@ -219,6 +311,7 @@
     tabStrip      = document.getElementById('tab-strip');
     historyToggle = document.getElementById('history-toggle');
     historyPanel  = document.getElementById('history-panel');
+    previewEl     = document.getElementById('session-preview');
 
     const newBtn = document.getElementById('new-session-btn');
     if (newBtn) {
