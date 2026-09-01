@@ -55,6 +55,19 @@ session-sitter/
 │   │   ├── ruleDecisions.ts            # the deterministic tier's records + reports
 │   │   ├── sessionIdentity.ts          # which session, on which machine — one format
 │   │   └── cli.ts                      # node out/supervisor/cli.js run|poll
+│   ├── telegram/                       # the remote interface (off by default)
+│   │   ├── ownership.ts                # which window is responsible for a session (pure)
+│   │   ├── lease.ts                    # elects ONE Telegram reader per machine
+│   │   ├── bus.ts                      # cross-window commands, claimed by atomic rename
+│   │   ├── topics.ts                   # session <-> forum topic, and the mirror cursor
+│   │   ├── render.ts                   # every message a human sees (pure)
+│   │   ├── intent.ts                   # update -> intent, and the authorisation boundary
+│   │   ├── forum.ts                    # the Telegram Topics calls, over the shared ApiFn
+│   │   ├── applyCommand.ts             # what the owning window does with a command
+│   │   ├── updateRouter.ts             # splits the ONE update stream: ours vs supervision's
+│   │   ├── topicRoutedChannel.ts       # posts a supervision card into its session's topic
+│   │   ├── launcher.ts                 # the only file here that touches vscode.commands
+│   │   └── RemoteControlService.ts     # the loop: mirror, apply, and (as reader) poll
 │   ├── corpus/                         # session corpus tooling
 │   │   ├── upload.ts  mask.ts  cli.ts
 │   └── webview/
@@ -567,6 +580,118 @@ the fill *and* a contrast-checked label colour and attaches the pair to the row;
 no rule gets no field at all, which is what leaves its pill on the theme's badge colour. An
 unparsable value is skipped rather than fatal, so a typo reads as "this project is not coloured"
 instead of a broken panel.
+
+---
+
+## The Telegram remote interface
+
+Off by default. Turned on, each session becomes a topic in a Telegram forum group and the topic you
+type in *is* the session you address. → [`TELEGRAM.md`](TELEGRAM.md) for the user-facing side.
+
+### Why responsibility splits two ways
+
+One constraint shapes everything: **a bot token has a single update stream, and `getUpdates` consumes
+it destructively.** Two windows polling the same token do not each get a copy — every update goes to
+whichever asked first. So the feature has two independent layers, and a window's behaviour depends on
+both.
+
+| | Scope | Decided by |
+|---|---|---|
+| **Writing** to Telegram | Every window, for its own sessions | Ownership (`ownership.ts`) |
+| **Reading** from Telegram | Exactly one window per machine | A lease (`lease.ts`) |
+
+Writing needs no coordination — `sendMessage` is not exclusive, and two windows own disjoint sets of
+sessions, so they cannot collide. Only reading is leased, which keeps the shared component as small as
+the constraint allows.
+
+This also closes a defect that predates the feature: every window with `autoSupervise` on and a state
+dir set polls `getUpdates` with the same token and one shared offset file, so replies were already
+split at random. It half-worked because the state dir is shared — a window that grabbed another's
+reply could still find that record — but for Claude the decision was then applied to the *wrong*
+session. Routing an inbound reply to the owning window is what fixes that.
+
+### Ownership: claim by what a window holds, not by path
+
+The obvious rule — the window whose workspace is the session's cwd — is wrong in cases this repository
+creates deliberately. So three tiers, strongest first:
+
+1. **A window has it open**, from the `openClaudeSessionIds` / `openBobTaskIds` this window registry
+   already publishes. Exact, and it is what makes a write land correctly.
+2. **The longest containing workspace folder.** Covers idle and history sessions, and gets the
+   worktree case right: a session in `<repo>/.claude/worktrees/feat` belongs to the window on the
+   worktree if one is open, and to the parent repo's window otherwise. A separator check stops
+   `/work/app` claiming `/work/app-legacy`.
+3. **Nobody**, so the session is read-only — reported, never silently swallowed.
+
+Every tier is computed from a registry snapshot passed in, so ownership is pure and unit-tested; ties
+break on lowest pid, which is what lets each window reach the same answer without talking to the
+others.
+
+### The bus: addressed by session, claimed by rename
+
+The reading window is usually not the window that owns the target session, so the command travels over
+a per-machine spool in `~/.claude/session-sitter/bus/`.
+
+Commands are addressed by **session id, not by window**. The reader keeps no routing table and never
+learns which window holds what: it drops a file, and the owner picks it up. Claiming is
+`rename('cmd/x.json' → 'cmd/x.taken.<pid>')` — the only atomic claim primitive available across
+unrelated processes on one filesystem, so exactly one window can win and no window can steal another's
+work. Results come back as files too, because the window that applied a command is not the window that
+must report to Telegram.
+
+A command nobody claims within its TTL is reported as having no owner. That case — typing into a topic
+whose session has no live window — is precisely where a message would otherwise vanish.
+
+### Why no cross-machine plumbing
+
+Each machine runs its own bot, and all the bots join the same group. Each gets an independent update
+stream, so nothing is stolen, and the fleet view is the union of their topics. That removes the SSH
+command hop, remote writes, and any fleet-wide coordinator: coordination is intra-machine only, which
+is the easy case (one lock file, one local filesystem).
+
+The cost is one bot per machine, and the token has to live outside VS Code settings — Settings Sync
+would copy one machine's token to all of them and quietly recreate the stolen-update problem.
+
+### One reader, two consumers
+
+Supervision also wants inbound updates, and there is still only one stream. So when the remote
+interface is active it does the reading, and supervision drains a handover queue instead of calling
+`getUpdates` (`TelegramChannelOptions.updateSource`). With the interface off, that path is untouched
+and supervision polls exactly as before.
+
+`updateRouter.ts` attributes each update by the only part of it whose format each side controls — its
+callback payload. Remote control's buttons are prefixed `rc|`; supervision's are
+`<requestId>|<index>`. Text messages are attributed by where they were typed: in a session topic it is
+a prompt, a reply to a live card is a decision, and a bare message in General is neither.
+
+An unattributable update goes to **supervision**, deliberately. Its updates answer a question an agent
+is blocked on with a timeout running: a misrouted remote-control message is reported back within a
+second, whereas a swallowed supervision reply becomes a denied action minutes later.
+
+`topicRoutedChannel.ts` then closes the loop the other way: a decision card for a session posts into
+that session's topic, keeping its original `<requestId>|<index>` buttons so answering from inside the
+topic routes back to supervision. It falls back to the plain channel when a session has no topic yet —
+which is normal, since a prompt can be raised before the owning window's next pass creates one.
+
+### The refusal that matters
+
+Injecting into Claude means writing to a session's CLI transport, and the sessionId↔channel link is
+not exposed by every Claude build. `buildTargetedInjectFn` searches for it at send time — the channel
+map key, the channel's own scalar properties, `query.initConfig` — and falls back to the sole open
+channel when there is nothing to confuse it with.
+
+When several channels are open and none matches, **it sends nothing.** Delivering a user's prompt to
+the wrong agent is worse than not delivering it, because the wrong agent acts on it. The status is
+reported into the topic with what to do instead. That function is a string of JavaScript injected with
+`this` bound to Claude's manager, so it is tested against a fake manager via `new Function` — which
+covers the part that decides *which session gets the message* without needing a live IDE.
+
+### The rate limit is a design constraint
+
+A bot may send on the order of 20 messages a minute to one group; a busy agent produces far more turns.
+So the mirror posts user prompts and assistant text only — no tool-by-tool noise — and a burst
+collapses to one "… N earlier turns not shown" line while the cursor advances past all of it. Queuing
+instead would put the group minutes behind the sessions it is reporting on.
 
 ---
 

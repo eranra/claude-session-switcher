@@ -3,6 +3,90 @@
 This is the one file that names what the project used to be called. Everywhere else carries a
 single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
+## Unreleased
+
+### Telegram as a remote interface to your sessions
+
+Your sessions now appear as **topics** in a Telegram forum group. Open a topic to read that session's
+turns as they happen, and type in it to send a message straight into the agent. Off by default —
+`sessionSitter.telegram.remoteControl`.
+
+```
+GROUP "Session Sitter"  (Topics enabled)
+
+  # General                       ← the live list, /sessions /new /who /help
+  # 🟠 claude · sitter / sort order        2
+  # 🔄 bob · payments / refund flow
+  # ⚪ codex · scratch / spike
+```
+
+Topics were chosen over a menu message or a card-per-session because the thread *is* the selection:
+there is no "which session am I talking to?" state to get out of sync, unread badges are per session,
+and each session keeps its own scrollback. Supervision cards for a session now land in that session's
+topic instead of one undifferentiated feed.
+
+A topic appears automatically for any session that needs you or is running — `approval`, `question`,
+`finished`, `working` — and on demand for the quiet ones. Its name leads with the status, so the topic
+list doubles as a status board in the same amber / green / grey language the panel uses. A topic is
+**closed** — never deleted — after `sessionSitter.telegram.idleTopicCloseHours` of quiet, reopening by
+itself if the session revives.
+
+`/new` starts a session, offering the workspaces that currently have a window open. That list comes
+from the live window registry rather than a configured allowlist, so it can never offer a target
+nothing could run in.
+
+**What can be written to.** Reading works for all four agents. Writing does not, and the limit is in
+the agent rather than here:
+
+| Agent | Read | Write |
+|---|:---:|---|
+| Bob | ✅ | ✅ any task, live or historical |
+| Claude | ✅ | ⚠️ sessions open in their own window |
+| Codex | ✅ | ❌ no message API exists |
+| VS Code Chat | ✅ | ❌ no message API exists |
+
+A read-only topic says so in its header rather than accepting your message and dropping it.
+
+**Claude targeting, and one deliberate refusal.** Injecting a message means writing to a session's CLI
+transport, and the sessionId↔channel link is not exposed by every Claude build. It is now searched for
+at send time — the channel map key, the channel's own properties, `query.initConfig` — and falls back
+to the sole open channel where there is nothing to confuse it with. When several are open and none
+matches, **nothing is sent** and the topic says why. Delivering a prompt to the wrong agent is worse
+than not delivering it, because the wrong agent acts on it.
+
+**One bot per machine.** A bot token has a single update stream and reading it is destructive, so two
+machines sharing one steal each other's messages. Give each machine its own bot and add them all to the
+same group; the fleet view is the union of their topics. This removes any need for cross-machine
+plumbing — coordination is intra-machine only. Keep the token in the environment or a `.env` file
+rather than VS Code settings, because Settings Sync would copy one machine's token to all of them.
+
+**Fixed along the way: windows no longer fight over Telegram.** Every window with `autoSupervise` on
+and a state dir set was polling `getUpdates` with the same token and one shared offset file, so replies
+were already being split between windows at random. It half-worked because the state dir is shared, but
+for Claude the decision was then applied to the *wrong* session. Reading is now held by one window per
+machine under a renewable lease, and an inbound reply is routed to the window that owns the session it
+belongs to.
+
+**Ownership is claimed by what a window holds, not by path.** A window claims a session it actually has
+open, from the ids the window registry already publishes; failing that, the window whose workspace is
+the longest containing folder; failing that, nobody and the session is read-only. The path tier gets
+this repository's own worktree convention right — a session in `<repo>/.claude/worktrees/feat` belongs
+to the worktree's window if one is open — and a separator check stops `/work/app` claiming
+`/work/app-legacy`.
+
+**New settings**
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `sessionSitter.telegram.remoteControl` | `false` | The master switch. |
+| `sessionSitter.telegram.allowedUserIds` | `[]` | Telegram user ids permitted to drive it. **Empty authorises nobody** — a group is not a private chat, and rejected ids are logged so you can copy them in. |
+| `sessionSitter.telegram.idleTopicCloseHours` | `24` | How long a session may be quiet before its topic is closed. |
+
+The bot token and chat id are reused from the existing `sessionSitter.supervisor.telegram*` settings,
+so supervision cards and the conversation with a session share one group.
+
+Setup, the failure table, and the exact write limits: [`docs/TELEGRAM.md`](docs/TELEGRAM.md).
+
 ## 0.8.0
 
 ### The session list can hold still, and it sorts six ways

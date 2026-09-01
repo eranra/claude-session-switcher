@@ -347,6 +347,25 @@
           "default": true,
           "markdownDescription": "Whether decisions taken by your **deterministic** `sessionSitter.autoRespond` rules are also reported to the messaging channel as one-way updates. They are always recorded and shown in the panel's Supervision activity feed; turn this off to keep them out of Telegram.\n\nWith this on, every intervention Session Sitter makes is visible — not just the ones the supervisor AI decided."
         },
+        "sessionSitter.telegram.remoteControl": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Turn on the **Telegram remote interface**: your sessions appear as topics in a Telegram forum group, and typing in a session's topic sends that text into the session.\n\nEach session gets its own topic, so the thread you are typing in *is* the session you are talking to. `General` holds the live session list and the `/sessions`, `/new`, `/who` and `/help` commands.\n\nSetup, once:\n\n1. Create a Telegram **group**, open its settings and turn **Topics** on.\n2. Create a bot with @BotFather, and **disable privacy mode** for it (`/setprivacy` → Disable) so it can read messages typed in a topic.\n3. Add the bot to the group as an admin with **Manage Topics**.\n4. Put the bot token in `TELEGRAM_BOT_TOKEN` and the group id in `TELEGRAM_CHAT_ID` (environment or a `.env` file), or in `sessionSitter.supervisor.telegramBotToken` / `.telegramChatId`.\n5. List the Telegram user ids allowed to drive it in `sessionSitter.telegram.allowedUserIds` — **without this nothing is acted on**.\n\n**Use one bot per machine.** A bot token has a single message stream and reading it is destructive, so two machines sharing a token steal each other's messages. Prefer the environment or a `.env` file over VS Code settings for the token: Settings Sync would copy one machine's token to all of them.\n\nReading works for Claude, Bob, Codex and Chat sessions. Sending works for Bob, and for Claude sessions open in their own window; Codex and VS Code Chat expose no message API, so their topics are read-only and say so."
+        },
+        "sessionSitter.telegram.allowedUserIds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Telegram **user ids** permitted to drive the remote interface. **An empty list authorises nobody**, which is the default.\n\nThis matters more than it does for supervision cards: a group is not a private chat, so anyone who was ever invited could otherwise send text straight into your coding agents.\n\nTo find your id, turn the feature on, send any message in the group, and read the extension's Output log — the id of each rejected sender is logged for you to copy in.\n\nExample:\n\n```json\n[\"123456789\"]\n```"
+        },
+        "sessionSitter.telegram.idleTopicCloseHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "markdownDescription": "How long a session may be quiet before its topic is **closed**. Closed, never deleted — the scrollback and search stay, and the topic reopens by itself if the session becomes active again.\n\nWithout this, a long-running install accumulates a topic per session until the group's topic list is unusable."
+        },
         "sessionSitter.supervisor.knowledgeRepo": {
           "type": "string",
           "default": "",

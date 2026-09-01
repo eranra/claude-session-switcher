@@ -183,7 +183,12 @@ export function buildQuestionCard(record: SupervisionRecord): [string, ReplyMark
   return [lines.join('\n'), { inline_keyboard: keyboard }];
 }
 
-function defaultApi(token: string): ApiFn {
+/**
+ * The real Bot API transport. Exported so the remote-control feature drives the same HTTP path —
+ * including the timeout that must outlast a long poll — instead of growing a second one that
+ * would drift from it.
+ */
+export function defaultApi(token: string): ApiFn {
   const base = `https://api.telegram.org/bot${token}`;
   return async (method, payload) => {
     // Must exceed the getUpdates long-poll timeout so the socket doesn't close mid-wait.
@@ -218,6 +223,19 @@ export interface TelegramChannelOptions {
    */
   longPollSeconds?: number;
   log?: (msg: string) => void;
+  /**
+   * Take updates from here instead of calling `getUpdates`.
+   *
+   * A bot token has ONE update stream and reading it is destructive, so when the Telegram remote
+   * control is active it owns the read and forwards this channel the updates that belong to
+   * supervision. Two pollers on one token would each see a random half of the replies — which is the
+   * defect the remote control's reader lease exists to prevent, and it would be pointless to
+   * reintroduce it here.
+   *
+   * When set, offset tracking is the source's responsibility: this channel must not advance an offset
+   * for updates it did not fetch.
+   */
+  updateSource?: () => Array<Record<string, unknown>>;
 }
 
 export class TelegramChannel implements MessagingChannel {
@@ -228,8 +246,10 @@ export class TelegramChannel implements MessagingChannel {
   private readonly clock: Clock;
   private readonly longPoll: number;
   private readonly log: (msg: string) => void;
+  private readonly updateSource: (() => Array<Record<string, unknown>>) | undefined;
 
   constructor(opts: TelegramChannelOptions) {
+    this.updateSource = opts.updateSource;
     this.chatId = opts.chatId;
     this.offsetPath = opts.offsetPath;
     this.timeoutMinutes = opts.timeoutMinutes ?? 30;
@@ -287,6 +307,19 @@ export class TelegramChannel implements MessagingChannel {
       : null;
 
     const out: InboundResponse[] = [];
+
+    // Handed our updates by the remote control, which owns the single read on this token. It also
+    // owns the offset, so nothing here touches it.
+    if (this.updateSource !== undefined) {
+      for (const u of this.updateSource()) {
+        const update = (u ?? {}) as Record<string, unknown>;
+        const uid = typeof update.update_id === 'number' ? update.update_id : 0;
+        const resolved = await this.resolveUpdate(update, uid, byId, byMessage, latest);
+        if (resolved !== null) { out.push(resolved); }
+      }
+      return out;
+    }
+
     const offset = await this.readOffset();
     let resp: Record<string, unknown>;
     try {

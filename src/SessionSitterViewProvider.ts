@@ -411,6 +411,22 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
     void vscode.commands.executeCommand('claude-vscode.primaryEditor.open');
   }
 
+  /**
+   * Bring a session to the front, wherever it lives — this window, another window on this
+   * machine, or another machine entirely.
+   *
+   * Public so the Telegram remote control can offer "Focus in IDE" without reimplementing the
+   * cross-window and cross-machine handshakes. It reuses exactly the path a panel click takes, so
+   * the two cannot drift apart.
+   */
+  public async focusSession(sessionId: string, _source?: string): Promise<boolean> {
+    const outcome = await this._tryFocusForeignWindow(sessionId);
+    if (outcome === 'focused') { return true; }
+    if (outcome === 'foreign-failed') { return false; }
+    await this._openSessionLocal(sessionId);
+    return true;
+  }
+
   // Reveal a session in the current window, in the place it is ALREADY open.
   private async _openSessionLocal(sessionId: string): Promise<void> {
     const session = this._sessionManager.getSessions().find(s => s.sessionId === sessionId);

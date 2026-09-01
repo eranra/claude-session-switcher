@@ -103,6 +103,31 @@ deprecation.
 With `messagingChannel: "telegram"` but the token or chat id missing, the stub is used and a
 warning is logged — supervision degrades rather than failing silently.
 
+### Telegram remote control
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `sessionSitter.telegram.remoteControl` | `false` | Turn on the remote interface: each session becomes a topic in a Telegram forum group, and typing in a topic sends into that session. |
+| `sessionSitter.telegram.allowedUserIds` | `[]` | Telegram **user ids** permitted to drive it. **Empty authorises nobody.** Rejected ids are logged so you can copy them in. |
+| `sessionSitter.telegram.idleTopicCloseHours` | `24` | How long a session may be quiet before its topic is closed — closed, never deleted, and reopened if the session revives. |
+
+The bot token and chat id are **reused** from `sessionSitter.supervisor.telegramBotToken` /
+`.telegramChatId` (and their `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` fallbacks), so supervision
+cards and the conversation with a session land in the same group.
+
+Two things this feature needs that supervision does not:
+
+- **A forum group.** Topics cannot be enabled in a one-to-one chat, so `chatId` must be a group with
+  Topics on. Without it the session list still works and the extension says what to fix.
+- **One bot per machine, and the token out of VS Code settings.** A bot token has a single
+  destructive message stream, so two machines sharing one steal each other's messages. Settings Sync
+  would copy a token from settings to every machine, so keep it in the environment or a `.env` file.
+
+Enabled with no token resolved, or with an empty allowlist, the feature does **not** start and logs
+why — rather than connecting and discarding every message, which reads as a broken bot.
+
+Full walk-through: [`TELEGRAM.md`](TELEGRAM.md).
+
 ### Knowledge
 
 | Setting | Default | Purpose |

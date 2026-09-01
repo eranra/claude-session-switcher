@@ -254,6 +254,53 @@ invisible. Keep rule decisions out of Telegram — while still recording them �
 - **Supervision activity feed** — every decision, with failures expanding to their recorded error.
 - **Upload to corpus** — add a session to the store your rules are learned from, secrets redacted
   before anything is committed.
+- **Telegram remote control** (off by default) — every session becomes a topic in a Telegram forum
+  group; read it, and type into it, from your phone. → [below](#telegram-remote-control-optional)
+
+---
+
+## Telegram remote control (optional)
+
+Your sessions as **topics** in a Telegram forum group. The thread you type in *is* the session you
+are talking to, so there is no mode to get wrong.
+
+```
+GROUP "Session Sitter"  (Topics enabled)
+
+  # General                       ← the live list, /sessions /new /who /help
+  # 🟠 claude · sitter / sort order        2
+  # 🔄 bob · payments / refund flow
+  # ⚪ codex · scratch / spike
+```
+
+Open a topic and you get that session's turns as they happen, its supervision cards, a **Full
+transcript** upload, **Focus in IDE**, and a text box that sends straight into the agent.
+
+Reading works for all four agents. Writing works for Bob — any task, live or historical — and for
+Claude sessions open in their own window. Codex and VS Code Chat expose no message API, so their
+topics say they are read-only rather than dropping what you type.
+
+Turning it on, once per machine:
+
+```jsonc
+{
+  "sessionSitter.telegram.remoteControl": true,
+  "sessionSitter.telegram.allowedUserIds": ["123456789"]
+}
+```
+
+plus a group with Topics enabled, a bot with **privacy mode disabled** (otherwise it cannot see what
+you type in a topic), and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` in your environment or `.env`.
+
+Two things to know before you start:
+
+- **`allowedUserIds` is empty by default, and empty authorises nobody.** A group is not a private
+  chat, and acting on a message means typing into a live coding agent.
+- **Use one bot per machine.** A bot token has a single message stream and reading it is destructive,
+  so two machines sharing one steal each other's messages. Add each machine's bot to the same group;
+  the fleet view is the union.
+
+Full walk-through, including the failure table: → [`docs/TELEGRAM.md`](docs/TELEGRAM.md)
 
 ---
 
@@ -281,6 +328,7 @@ through the V8 inspector. → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, session detection, the supervision layer, the agent bridges |
 | [`docs/STATUS-INDICATORS.md`](docs/STATUS-INDICATORS.md) | the six row markers, and the rules that pick one — per agent |
 | [`docs/SUPERVISION.md`](docs/SUPERVISION.md) | the traffic lights, the lifecycle, the CLI, troubleshooting |
+| [`docs/TELEGRAM.md`](docs/TELEGRAM.md) | the remote interface: setup, ownership, write limits, troubleshooting |
 | [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md) | the BDI schema, the three tiers, routing |
 | [`docs/CORPUS.md`](docs/CORPUS.md) | collecting sessions, bulk import, secret masking |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | every setting, environment variable, flag and command |
@@ -322,9 +370,15 @@ the full gate, and publishes the `.vsix` to a GitHub Release.
 - **`python3` is required for Bob sessions** — a VS Code extension has no SQLite driver, and a
   native module would break VSIX portability. Confined to one file, read-only.
   → [why](docs/ARCHITECTURE.md#why-one-python3-call-remains)
-- **Claude message injection targets one conversation** — the sessionId↔channel link lives in
-  Claude's webview, not its extension host.
+- **Claude message injection cannot always pick a session** — the sessionId↔channel link is searched
+  for at send time and is not exposed by every Claude build. When a window has several Claude
+  sessions open and none matches, nothing is sent and you are told: delivering a prompt to the wrong
+  agent is worse than not delivering it.
 - **Supervision needs a classifier CLI** — `bob` or `claude` on your `PATH`.
+- **Telegram remote control needs a bot per machine** — a bot token has one destructive message
+  stream, so machines cannot share one. → [`docs/TELEGRAM.md`](docs/TELEGRAM.md#use-one-bot-per-machine)
+- **Telegram cannot write to Codex or VS Code Chat sessions** — neither exposes a message API. Their
+  topics are read-only and say so.
 
 ---
 

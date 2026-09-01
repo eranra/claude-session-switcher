@@ -38,6 +38,15 @@ import {
   type RuleDecision,
 } from './supervisor/ruleDecisions';
 import { StateStore } from './supervisor/store';
+import { buildCard, buildQuestionCard, defaultApi } from './supervisor/telegram';
+import { SupervisionState } from './supervisor/models';
+import { remoteControlConfigFrom, startupBlocker, type SettingsReader } from './telegram/config';
+import { ForumApi } from './telegram/forum';
+import { VsCodeSessionLauncher } from './telegram/launcher';
+import { RemoteControlService } from './telegram/RemoteControlService';
+import { TopicStore } from './telegram/topics';
+import { TopicRoutedChannel } from './telegram/topicRoutedChannel';
+import { UpdateQueue } from './telegram/updateRouter';
 
 export function activate(context: vscode.ExtensionContext) {
   const sessionManager = new SessionManager(context);
@@ -252,13 +261,70 @@ export function activate(context: vscode.ExtensionContext) {
     return { ...base, knowledgeLocalRepo: base.knowledgeLocalRepo || workspaceRoot };
   })();
 
+  // Remote-control settings are read here because they change how the messaging channel below is
+  // built: when the remote interface is on it owns the single read on the bot token, and supervision
+  // is handed its updates instead of polling for them.
+  //
+  // The adapter spells each setting name out in a direct read rather than forwarding the caller's
+  // string. That is the form `ci/check-settings.mjs` recognises, so these three keys count as read
+  // and cannot silently drift from their `package.json` declarations.
+  const remoteControlSettings: SettingsReader = {
+    getBoolean: (key, fallback) => (key === 'telegram.remoteControl'
+      ? cfg.get<boolean>('telegram.remoteControl', fallback)
+      : fallback),
+    getNumber: (key, fallback) => (key === 'telegram.idleTopicCloseHours'
+      ? cfg.get<number>('telegram.idleTopicCloseHours', fallback)
+      : fallback),
+    getStringArray: (key, fallback) => (key === 'telegram.allowedUserIds'
+      ? cfg.get<string[]>('telegram.allowedUserIds', fallback)
+      : fallback),
+  };
+  const remoteControlConfig = remoteControlConfigFrom(remoteControlSettings, supervisorConfig);
+  const remoteControlActive = remoteControlConfig.enabled && !!remoteControlConfig.botToken
+    && !!remoteControlConfig.chatId && remoteControlConfig.allowedUserIds.length > 0;
+
+  // A bot token has ONE update stream and reading it is destructive. So when the remote interface is
+  // active it does the reading, and supervision drains this queue instead of calling `getUpdates`.
+  // Two pollers on one token would each see a random half of the replies — the exact defect the
+  // remote control's reader lease exists to prevent.
+  const supervisionUpdates = new UpdateQueue();
+
   // ONE messaging channel per window, shared by the supervisor and the deterministic-rule
   // reporter: two Telegram consumers on the same bot would fight over `getUpdates`.
   // Built unconditionally: `autoRespond` rules act on the user's session with no supervisor and no
   // configuration at all, so their record and their notification can never be conditional on a
   // setting. The state dir always resolves, so there is always somewhere to write them.
   ensureDirs(supervisorConfig);
-  const channel: MessagingChannel = buildChannel(supervisorConfig, log);
+  const baseChannel: MessagingChannel = buildChannel(
+    supervisorConfig, log,
+    remoteControlActive ? () => supervisionUpdates.drain() : undefined);
+  if (remoteControlActive) {
+    log('supervision: inbound replies arrive via the Telegram remote control, which owns the single '
+      + 'read on this bot token.');
+  }
+
+  // With the remote interface on, a decision about a session posts into THAT session's topic rather
+  // than a single shared feed — beside the conversation it is about, which is where it is answered
+  // from. Falls back to the plain channel when the session has no topic yet.
+  const remoteTopics = new TopicStore();
+  const channel: MessagingChannel = remoteControlActive
+    ? new TopicRoutedChannel({
+      inner: baseChannel,
+      topics: remoteTopics,
+      forum: new ForumApi(
+        defaultApi(remoteControlConfig.botToken), remoteControlConfig.chatId, log),
+      buildCard: (record, notification, interactive) => (
+        interactive && record.state === SupervisionState.ORANGE_AWAITING_QUESTION
+          && record.question_spec
+          ? buildQuestionCard(record)
+          : buildCard(record, notification, {
+            interactive,
+            minutesLeft: interactive ? supervisorConfig.orangeResponseTimeoutMinutes : null,
+          })
+      ),
+      log,
+    })
+    : baseChannel;
   const ruleRecorder = new RuleDecisionRecorder({
     store: new StateStore(recordsDir(supervisorConfig)),
     channel,
@@ -307,6 +373,39 @@ export function activate(context: vscode.ExtensionContext) {
   } else if (autoSupervise) {
     log('supervision not started: set sessionSitter.supervisorStateDir '
       + '(and sessionSitter.supervisorRepoPath if it cannot be derived from it).');
+  }
+
+  // ── Telegram remote control ───────────────────────────────────────────────
+  //
+  // Runs in EVERY window, because responsibility for a session belongs to the window that owns it.
+  // Only one window per machine READS Telegram; that is settled by a lease inside the service.
+  // Writing is unleased — each window posts its own sessions' messages. Default off.
+  let remoteControl: RemoteControlService | undefined;
+  if (remoteControlActive) {
+    remoteControl = new RemoteControlService({
+      config: remoteControlConfig,
+      sessionManager,
+      bobSender: sender,
+      claudeSender,
+      launcher: new VsCodeSessionLauncher(
+        log, (sessionId, source) => provider.focusSession(sessionId, source)),
+      api: defaultApi(remoteControlConfig.botToken),
+      log,
+      // Supervision no longer polls for itself, so its updates are forwarded here.
+      supervisionSink: update => supervisionUpdates.push(update),
+      supervisionMessageIds: async () => {
+        const store = new StateStore(recordsDir(supervisorConfig));
+        const awaiting = await store.byState(
+          SupervisionState.ORANGE_AWAITING_USER, SupervisionState.ORANGE_AWAITING_QUESTION);
+        return new Set(
+          awaiting.map(r => String(r.notification_id ?? '')).filter(id => id.length > 0));
+      },
+    });
+    remoteControl.start();
+    context.subscriptions.push({ dispose: () => remoteControl?.dispose() });
+  } else {
+    const blocker = startupBlocker(remoteControlConfig);
+    if (blocker !== null) { log(`remote control: not started — ${blocker}`); }
   }
 
   // Export the most-recent Claude session's transcript (with its live pending approval) for the

@@ -26,7 +26,16 @@ import { FetchFn } from './knowledge';
 
 export type Logger = (msg: string) => void;
 
-export function buildChannel(config: SupervisorConfig, log: Logger = () => { /* silent */ }): MessagingChannel {
+/**
+ * @param updateSource When given, the Telegram channel takes its updates from here instead of
+ * calling `getUpdates`. Used when the remote interface is active: a bot token has one destructive
+ * update stream, so it owns the read and forwards supervision what belongs to it.
+ */
+export function buildChannel(
+  config: SupervisorConfig,
+  log: Logger = () => { /* silent */ },
+  updateSource?: () => Array<Record<string, unknown>>,
+): MessagingChannel {
   if (config.messagingChannel === 'telegram') {
     if (config.telegramBotToken && config.telegramChatId) {
       return new TelegramChannel({
@@ -36,6 +45,7 @@ export function buildChannel(config: SupervisorConfig, log: Logger = () => { /* 
         timeoutMinutes: config.orangeResponseTimeoutMinutes,
         longPollSeconds: 10, // getUpdates returns instantly on a tap/reply
         log,
+        updateSource,
       });
     }
     log('warning: messaging channel is telegram but the bot token / chat id are missing; '
