@@ -19,7 +19,7 @@ function session(over: Partial<SortableSession> = {}): SortableSession {
     projectName: 'alpha',
     title: 'a task',
     updatedAt: new Date('2026-09-01T10:00:00Z'),
-    status: 'idle',
+    status: 'seen',
     source: 'claude',
     ...over,
   };
@@ -181,19 +181,23 @@ describe('sortSessions: title', () => {
 });
 
 describe('sortSessions: needs you first', () => {
-  it('orders waiting, then running, then idle', () => {
+  it('orders the states most-actionable first', () => {
     const rows = [
-      session({ sessionId: 'idle', status: 'idle' }),
-      session({ sessionId: 'active', status: 'active' }),
-      session({ sessionId: 'waiting', status: 'waiting' }),
+      session({ sessionId: 'dormant', status: 'dormant' }),
+      session({ sessionId: 'seen', status: 'seen' }),
+      session({ sessionId: 'working', status: 'working' }),
+      session({ sessionId: 'finished', status: 'finished' }),
+      session({ sessionId: 'question', status: 'question' }),
+      session({ sessionId: 'approval', status: 'approval' }),
     ];
-    expect(ids(sortSessions(rows, 'status'))).toEqual(['waiting', 'active', 'idle']);
+    expect(ids(sortSessions(rows, 'status')))
+      .toEqual(['approval', 'question', 'finished', 'working', 'seen', 'dormant']);
   });
 
   it('falls back to recency inside a status group', () => {
     const rows = [
-      session({ sessionId: 'older', status: 'waiting', updatedAt: new Date('2026-08-01T00:00:00Z') }),
-      session({ sessionId: 'newer', status: 'waiting', updatedAt: new Date('2026-09-01T00:00:00Z') }),
+      session({ sessionId: 'older', status: 'approval', updatedAt: new Date('2026-08-01T00:00:00Z') }),
+      session({ sessionId: 'newer', status: 'approval', updatedAt: new Date('2026-09-01T00:00:00Z') }),
     ];
     expect(ids(sortSessions(rows, 'status'))).toEqual(['newer', 'older']);
   });

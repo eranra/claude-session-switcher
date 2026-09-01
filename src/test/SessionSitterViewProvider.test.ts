@@ -158,9 +158,35 @@ function setOpenClaudeTabs(labels: string[]): void {
   }];
 }
 
+/**
+ * A stand-in for `context.globalState`, holding the last-viewed stamps in memory.
+ *
+ * Seed it to say "you already read this session at time T"; read it back to assert a click was
+ * recorded. Without one the provider still works, it just cannot tell read from unread — which is
+ * itself worth a test.
+ */
+function makeMemento(seed: Record<string, number> = {}) {
+  let store: Record<string, number> = { ...seed };
+  return {
+    memento: {
+      get: <T>(_key: string, fallback: T) => (store as unknown as T) ?? fallback,
+      update: (_key: string, value: unknown) => {
+        store = value as Record<string, number>;
+        return Promise.resolve();
+      },
+      keys: () => ['sessionSitter.lastViewed'],
+    } as unknown as import('vscode').Memento,
+    read: () => store,
+  };
+}
+
 function makeProvider(
   sessions: import('../SessionManager').ClaudeSession[] = [],
   extra: Partial<Record<string, unknown>> = {},
+  opts: {
+    memento?: import('vscode').Memento;
+    pending?: ReadonlyMap<string, 'approval' | 'question'>;
+  } = {},
 ) {
   const mockManager = {
     getSessions: vi.fn().mockReturnValue(sessions),
@@ -171,6 +197,10 @@ function makeProvider(
   return new SessionSitterViewProvider(
     { fsPath: '/fake' } as unknown as import('vscode').Uri,
     mockManager,
+    undefined,
+    undefined,
+    opts.memento,
+    opts.pending ? () => opts.pending! : undefined,
   );
 }
 
@@ -206,7 +236,7 @@ describe('_handleFocusRequest', () => {
     // Provide the session so _openSessionLocal can find it and dispatch
     const session = {
       sessionId: 'abc-123', projectPath: '/home/user/project', projectName: 'project',
-      title: 'Test', updatedAt: new Date(), status: 'idle' as const, source: 'claude' as const,
+      title: 'Test', updatedAt: new Date(), status: 'seen' as const, source: 'claude' as const,
     };
     const provider = makeProvider([session]);
     await (provider as unknown as { _handleFocusRequest(u: { fsPath: string }): Promise<void> })
@@ -270,7 +300,7 @@ type PrivateProvider = {
 function providerWithSession(projectPath: string): PrivateProvider {
   const session = {
     sessionId: 'S', projectPath, projectName: 'proj', title: 'S',
-    updatedAt: new Date(), status: 'idle' as const, source: 'claude' as const,
+    updatedAt: new Date(), status: 'seen' as const, source: 'claude' as const,
   };
   return makeProvider([session]) as unknown as PrivateProvider;
 }
@@ -352,7 +382,7 @@ describe('_tryFocusForeignWindow', () => {
 describe('_openSessionLocal', () => {
   const session = {
     sessionId: 'sess-1', projectPath: '/p', projectName: 'p', title: 'My Session',
-    updatedAt: new Date(), status: 'idle' as const, source: 'claude' as const,
+    updatedAt: new Date(), status: 'seen' as const, source: 'claude' as const,
   };
 
   type Openable = { _openSessionLocal(id: string): Promise<void> };
@@ -459,7 +489,7 @@ function makeBobSession(overrides: Partial<import('../SessionManager').ClaudeSes
     projectName: 'proj',
     title: 'My Bob Task',
     updatedAt: new Date(),
-    status: 'idle' as const,
+    status: 'seen' as const,
     source: 'bob' as const,
     ...overrides,
   };
@@ -565,7 +595,7 @@ describe('webview message: addFromHistory (Bob)', () => {
   it('calls claude-vscode.primaryEditor.open for a Claude history session', async () => {
     const claudeSession = {
       sessionId: 'claude-hist-1', projectPath: '/p', projectName: 'p',
-      title: 'Claude task', updatedAt: new Date(), status: 'idle' as const, source: 'claude' as const,
+      title: 'Claude task', updatedAt: new Date(), status: 'seen' as const, source: 'claude' as const,
     };
     const handler = resolveWebview(makeProvider([claudeSession]));
     await handler({ type: 'addFromHistory', sessionId: 'claude-hist-1' });
@@ -606,7 +636,7 @@ describe('Sessions view: active-vs-history partition', () => {
     sessionId: string,
     minutesAgo: number,
     source: 'claude' | 'bob' | 'codex' | 'chat' = 'claude',
-    status: 'active' | 'waiting' | 'idle' = 'idle',
+    status: import('../sessionStatus').SessionStatus = 'seen',
   ): import('../SessionManager').ClaudeSession {
     return {
       sessionId,
@@ -662,12 +692,12 @@ describe('Sessions view: active-vs-history partition', () => {
       .toEqual(['c-elsewhere']);
   });
 
-  it('treats a non-idle session as active even when no probe reports it open', async () => {
-    // Fallback for a WSL2 / inspector hiccup: a task that is running or waiting on you must not
-    // vanish into History just because the live probe was momentarily silent.
+  it('treats a working session as active even when no probe reports it open', async () => {
+    // Fallback for a WSL2 / inspector hiccup: a task that is running must not vanish into History
+    // just because the live probe was momentarily silent.
     const provider = makeProvider([
-      makeSession('b-running', 60, 'bob', 'active'),
-      makeSession('b-idle', 5, 'bob', 'idle'),
+      makeSession('b-running', 60, 'bob', 'working'),
+      makeSession('b-idle', 5, 'bob', 'seen'),
     ]);
     const postMessage = resolveWebviewCapturing(provider);
     await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
@@ -679,12 +709,12 @@ describe('Sessions view: active-vs-history partition', () => {
       .toEqual(['b-idle']);
   });
 
-  it('ages a stale non-idle session into History', async () => {
-    // The non-idle fallback covers a momentary probe hiccup, not a session abandoned weeks ago.
-    // A month-old transcript has no live process behind it whatever its inferred status says.
+  it('ages a stale working session into History', async () => {
+    // The fallback covers a momentary probe hiccup, not a session abandoned weeks ago. A
+    // month-old transcript has no live process behind it whatever its inferred status says.
     const provider = makeProvider([
-      makeSession('c-stale-waiting', 60 * 24 * 29, 'claude', 'waiting'),
-      makeSession('c-stale-active', 60 * 24 * 3, 'claude', 'active'),
+      makeSession('c-stale-waiting', 60 * 24 * 29, 'claude', 'working'),
+      makeSession('c-stale-active', 60 * 24 * 3, 'claude', 'working'),
     ]);
     const postMessage = resolveWebviewCapturing(provider);
     await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
@@ -701,7 +731,7 @@ describe('Sessions view: active-vs-history partition', () => {
       { pid: 3, workspaceFolders: [], ideCli: 'code', ipcSocket: '', updatedAt: Date.now(),
         openClaudeSessionIds: ['c-old-but-open'] },
     ]);
-    const provider = makeProvider([makeSession('c-old-but-open', 60 * 24 * 29, 'claude', 'waiting')]);
+    const provider = makeProvider([makeSession('c-old-but-open', 60 * 24 * 29, 'claude', 'working')]);
     const postMessage = resolveWebviewCapturing(provider);
     await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
 
@@ -794,7 +824,7 @@ describe('Sessions view: active-vs-history partition', () => {
   function peerSession(
     sessionId: string, minutesAgo: number, source: 'claude' | 'bob' = 'claude',
   ): import('../SessionManager').ClaudeSession {
-    return { ...makeSession(sessionId, minutesAgo, source, 'idle'), peer: 'vpcuser@olap.ibm.com' };
+    return { ...makeSession(sessionId, minutesAgo, source, 'seen'), peer: 'vpcuser@olap.ibm.com' };
   }
 
   it('keeps an idle peer session active when the peer window reports it open', async () => {
@@ -856,6 +886,153 @@ describe('Sessions view: active-vs-history partition', () => {
     expect(capture(postMessage, 'updateSessions')?.sessions.map(s => s.sessionId))
       .toEqual(['c-local']);
   });
+  // ── Tests: the display status ─────────────────────────────────────────────────
+  //
+  // The row's status is not simply what the scan inferred. Two panel-side signals fold into it: a
+  // live pending approval read from Bob's host, and whether you have opened the session since it last
+  // changed. Both are resolved once, in the provider, so the worklist filter, the sort and the row
+  // can never disagree about a session — and the asymmetry matters: a live signal may UPGRADE a
+  // status, never downgrade one, because the probe can only see its own window.
+  describe('display status', () => {
+    function statusOf(
+      postMessage: ReturnType<typeof vi.fn>,
+      id: string,
+      type: 'updateSessions' | 'updateHistory' = 'updateSessions',
+    ) {
+      return capture(postMessage, type)?.sessions.find(s => s.sessionId === id)?.status;
+    }
+
+    it('a live pending approval marks a working session as blocked on you', async () => {
+      const provider = makeProvider(
+        [makeSession('b-1', 1, 'bob', 'working')],
+        {},
+        { pending: new Map([['b-1', 'approval' as const]]) },
+      );
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
+
+      expect(statusOf(postMessage, 'b-1')).toBe('approval');
+    });
+
+    it('a live pending question is distinguished from an approval', async () => {
+      const provider = makeProvider(
+        [makeSession('b-1', 1, 'bob', 'working')],
+        {},
+        { pending: new Map([['b-1', 'question' as const]]) },
+      );
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
+
+      expect(statusOf(postMessage, 'b-1')).toBe('question');
+    });
+
+    it('an empty pending map never downgrades an inferred blocked state', async () => {
+      // The probe only sees its own window, so "no pending reported" routinely means "open in
+      // another window". Treating that silence as proof would turn every cross-window approval
+      // prompt grey, which is the failure this design exists to fix.
+      const provider = makeProvider(
+        [makeSession('c-1', 1, 'claude', 'approval')],
+        {},
+        { pending: new Map() },
+      );
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
+
+      expect(statusOf(postMessage, 'c-1')).toBe('approval');
+    });
+
+    it('a finished session you have already opened shows as seen', async () => {
+      const { memento } = makeMemento({ 'c-1': Date.now() });
+      const provider = makeProvider(
+        [makeSession('c-1', 5, 'claude', 'finished')], {}, { memento });
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushHistory(): Promise<void> })._pushHistory();
+
+      expect(statusOf(postMessage, 'c-1', 'updateHistory')).toBe('seen');
+    });
+
+    it('a finished session changed since you last looked stays unread', async () => {
+      const { memento } = makeMemento({ 'c-1': Date.now() - 60 * 60_000 });
+      const provider = makeProvider(
+        [makeSession('c-1', 5, 'claude', 'finished')], {}, { memento });
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushHistory(): Promise<void> })._pushHistory();
+
+      expect(statusOf(postMessage, 'c-1', 'updateHistory')).toBe('finished');
+    });
+
+    it('with no memento a finished session simply stays unread', async () => {
+      // Read-tracking is optional decoration. Without it the panel must still work, erring towards
+      // "you have not seen this" rather than silently marking everything read.
+      const provider = makeProvider([makeSession('c-1', 5, 'claude', 'finished')]);
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushHistory(): Promise<void> })._pushHistory();
+
+      expect(statusOf(postMessage, 'c-1', 'updateHistory')).toBe('finished');
+    });
+
+    it('opening a session records that you have read it', async () => {
+      const { memento, read } = makeMemento();
+      const provider = makeProvider(
+        [makeSession('c-1', 5, 'claude', 'finished')], {}, { memento });
+      resolveWebviewCapturing(provider);
+      await (provider as unknown as {
+        _markViewed(id: string): Promise<void>;
+      })._markViewed('c-1');
+
+      expect(read()['c-1']).toBeGreaterThan(0);
+    });
+
+    it('forgets stamps for sessions that no longer exist', async () => {
+      // Otherwise the panel accumulates one timestamp per session ever opened, for the life of the
+      // install. A dropped stamp is harmless: its row is gone from both lists.
+      const { memento, read } = makeMemento({ 'long-gone': 1_000 });
+      const provider = makeProvider(
+        [makeSession('c-1', 5, 'claude', 'finished')], {}, { memento });
+      resolveWebviewCapturing(provider);
+      await (provider as unknown as {
+        _markViewed(id: string): Promise<void>;
+      })._markViewed('c-1');
+
+      expect(read()['long-gone']).toBeUndefined();
+      expect(read()['c-1']).toBeGreaterThan(0);
+    });
+  });
+
+  // ── Tests: blocked sessions never age out ────────────────────────────────────
+  describe('worklist: blocked on you', () => {
+    it('keeps a month-old session waiting for approval in the worklist', async () => {
+      // A session blocked on your approval is stuck, not stale. The age bound exists to drop
+      // abandoned mid-turn transcripts; applying it here would hide the one row you must act on.
+      const provider = makeProvider([makeSession('c-blocked', 60 * 24 * 29, 'claude', 'approval')]);
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
+
+      expect(capture(postMessage, 'updateSessions')?.sessions.map(s => s.sessionId))
+        .toEqual(['c-blocked']);
+    });
+
+    it('keeps an old unanswered question in the worklist too', async () => {
+      const provider = makeProvider([makeSession('c-asked', 60 * 24 * 5, 'claude', 'question')]);
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
+
+      expect(capture(postMessage, 'updateSessions')?.sessions.map(s => s.sessionId))
+        .toEqual(['c-asked']);
+    });
+
+    it('files a finished session under History — it is a result, not a live session', async () => {
+      const provider = makeProvider([makeSession('c-done', 5, 'claude', 'finished')]);
+      const postMessage = resolveWebviewCapturing(provider);
+      await (provider as unknown as { _pushSessions(): Promise<void> })._pushSessions();
+      await (provider as unknown as { _pushHistory(): Promise<void> })._pushHistory();
+
+      expect(capture(postMessage, 'updateSessions')?.sessions).toHaveLength(0);
+      expect(capture(postMessage, 'updateHistory')?.sessions.map(s => s.sessionId))
+        .toEqual(['c-done']);
+    });
+  });
+
 });
 
 // ── Tests: copy transcript handlers ──────────────────────────────────────────
@@ -998,7 +1175,7 @@ describe('session order and workspace colours', () => {
       projectName: 'alpha',
       title: `t-${sessionId}`,
       updatedAt: new Date(Date.now() - 60_000),
-      status: 'active',
+      status: 'working',
       source: 'claude',
       ...over,
     };
@@ -1094,8 +1271,8 @@ describe('session order and workspace colours', () => {
   it('colours History rows too, and sorts them the same way', async () => {
     withSettings({ sessionSort: 'title', workspaceColors: { '*': 'blue' } });
     const provider = makeProvider([
-      activeSession('h-z', { title: 'zebra', status: 'idle', updatedAt: new Date(0) }),
-      activeSession('h-a', { title: 'apple', status: 'idle', updatedAt: new Date(0) }),
+      activeSession('h-z', { title: 'zebra', status: 'seen', updatedAt: new Date(0) }),
+      activeSession('h-a', { title: 'apple', status: 'seen', updatedAt: new Date(0) }),
     ]);
     const { postMessage } = resolveWebviewCapturing(provider);
     await (provider as unknown as { _pushHistory(): Promise<void> })._pushHistory();

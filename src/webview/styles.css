@@ -327,46 +327,129 @@ button:focus-visible {
 }
 
 /* ── Status Indicator ────────────────────────────────────────────────────── */
+/*
+ * Six states, distinguished by SHAPE first and colour second.
+ *
+ * At this size there is no room for detail, so the silhouette carries the meaning: a spinning ring
+ * for work in progress, a solid arrow for a permission prompt, a question mark for a question, a
+ * ringed dot for an unread result, a small flat dot for one you have read, a hollow hairline circle
+ * for nothing happening. That ordering is deliberate — a row must still read correctly for someone
+ * who cannot separate the hues, and in a high-contrast theme where our colours are overridden.
+ *
+ * Motion belongs to `working` alone. Anything that moves reads as "busy, leave it alone", which is
+ * the opposite of what a session blocked on your approval needs to say.
+ */
 
 .status-indicator {
   flex-shrink: 0;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 2px;
-  margin-top: 4px;
-  align-self: auto;
-}
-
-/* idle: dim dot so the session is visibly tracked */
-.status-idle {
-  background-color: var(--vscode-editor-foreground, #888);
-  opacity: 0.25;
-}
-
-/* waiting: slow pulse — user sent a message, Claude hasn't replied yet */
-.status-waiting {
-  background-color: var(--vscode-charts-yellow, #cca700);
-  animation: pulse 1.8s ease-in-out infinite;
-}
-
-/* active: fast spin — Claude is executing tools */
-.status-active {
-  background: transparent;
   width: 10px;
   height: 10px;
+  border-radius: 50%;
+  margin-right: 2px;
+  margin-top: 3px;
+  align-self: auto;
+  /* Shared by the glyph states (approval, question) — see below. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* working: a spinning ring. The only state that moves. */
+.status-working {
+  background: transparent;
   border: 2px solid var(--vscode-charts-green, #4caf50);
   border-top-color: transparent;
   animation: spin 0.7s linear infinite;
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1;   transform: scale(1); }
-  50%       { opacity: 0.3; transform: scale(0.75); }
+/*
+ * approval: a solid amber triangle pointing right — "run this?".
+ *
+ * Filled and static: it is the most urgent state, so it must be the most visually solid thing in
+ * the list, and it must not be mistaken for progress.
+ */
+.status-approval {
+  background: var(--vscode-charts-orange, #d18616);
+  border-radius: 2px;
+  clip-path: polygon(15% 0%, 100% 50%, 15% 100%);
+}
+
+/*
+ * question: an amber question mark. A different shape from approval because it asks for different
+ * input — typing, not a click.
+ *
+ * A glyph rather than a drawn shape, because "?" is the one symbol that needs no learning. It is
+ * allowed to overflow its 10px box: clipping the descender would leave an amber blob that reads as
+ * nothing in particular.
+ */
+.status-question {
+  background: transparent;
+  color: var(--vscode-charts-orange, #d18616);
+  border-radius: 0;
+  font-size: 12px;
+  overflow: visible;
+}
+
+.status-question::before {
+  content: '?';
+}
+
+/* finished: a green dot inside a ring — a result waiting to be read. Static. */
+.status-finished {
+  background: var(--vscode-charts-green, #4caf50);
+  box-shadow: 0 0 0 1px var(--vscode-editor-background, #1e1e1e),
+              0 0 0 3px var(--vscode-charts-green, #4caf50);
+  width: 6px;
+  height: 6px;
+  margin-top: 5px;
+  margin-right: 4px;
+  margin-left: 2px;
+}
+
+/* seen: a small flat dot. Present, tracked, not asking for anything. */
+.status-seen {
+  background-color: var(--vscode-editor-foreground, #888);
+  opacity: 0.45;
+  width: 6px;
+  height: 6px;
+  margin-top: 5px;
+  margin-left: 2px;
+}
+
+/*
+ * dormant: a hollow hairline circle.
+ *
+ * A different SHAPE from `seen`, not merely a dimmer version of it. The two mean genuinely
+ * different things — "finished, you read it" versus "nothing is happening, or we cannot tell" —
+ * and the old single grey dot that meant both is exactly the ambiguity this state set removes.
+ */
+.status-dormant {
+  background: transparent;
+  border: 1px solid var(--vscode-editor-foreground, #888);
+  opacity: 0.35;
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  margin-left: 1px;
 }
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/*
+ * Someone who asked the OS for less motion gets a static ring instead of a spinner. The state is
+ * still legible — it is the only ring in the set — so nothing is lost but the animation.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .status-working {
+    animation: none;
+    border-top-color: var(--vscode-charts-green, #4caf50);
+    opacity: 0.8;
+  }
 }
 
 /* Close (×) button — right side, visible on hover */

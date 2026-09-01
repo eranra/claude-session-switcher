@@ -417,12 +417,17 @@
 
   // ── Tab builder ───────────────────────────────────────────────────────────
 
+  /** How each agent is named on a badge and in a status tooltip. One list, so they agree. */
+  const SOURCE_LABELS = { claude: 'Claude', bob: 'Bob', codex: 'Codex', chat: 'Chat' };
+
+  /** Agents that expose no liveness signal at all, so their rows can only ever be dormant. */
+  const PROBELESS_SOURCES = ['codex', 'chat'];
+
   // Uniform metadata rows shared by buildTab and buildHistoryItem — appends
   // the source badge (Claude/Bob/Codex/Chat) and the workspace pill (or
   // "(no workspace)" fallback) as separate children so `.tab-text` (flex
   // column) stacks them on their own lines.
   function appendSessionMetaRows(textEl, session) {
-    const SOURCE_LABELS = { claude: 'Claude', bob: 'Bob', codex: 'Codex', chat: 'Chat' };
     const label = SOURCE_LABELS[session.source];
     if (label) {
       const sourceBadge = document.createElement('span');
@@ -472,11 +477,7 @@
     tab.setAttribute('tabindex', '0');
     tab.setAttribute('title', (session.title || '(untitled)') + ' — ' + formatRelativeTime(session.updatedAt));
 
-    const statusEl = document.createElement('span');
-    statusEl.className = 'status-indicator status-' + (session.status || 'idle');
-    statusEl.setAttribute('title',
-      session.status === 'active'  ? 'Running' :
-      session.status === 'waiting' ? 'Waiting for response' : '');
+    const statusEl = buildStatusIndicator(session);
 
     const textEl = document.createElement('div');
     textEl.className = 'tab-text';
@@ -698,6 +699,56 @@
     }
     el.title = 'session ' + (item.sessionId || '(unknown)')
       + (item.host ? ' on ' + item.host : '');
+    return el;
+  }
+
+  /**
+   * What each status marker means, in words, for its tooltip.
+   *
+   * Six shapes are only learnable if hovering explains them, so every state gets a sentence —
+   * including the quiet ones, which previously had no tooltip at all and so left you guessing
+   * whether a grey row was finished or simply unknown. `dormant` says which of the two it is,
+   * because for Codex and VS Code Chat there is genuinely no liveness signal to read.
+   *
+   * @param {object} session
+   * @returns {string}
+   */
+  function statusTooltip(session) {
+    const agent = SOURCE_LABELS[session.source] || 'The agent';
+    switch (session.status) {
+      case 'approval': return agent + ' is waiting for your approval to run a tool.';
+      case 'question': return agent + ' asked you a question and is waiting for an answer.';
+      case 'finished': return agent + ' finished. You have not opened this since.';
+      case 'working':  return agent + ' is working — running a tool or writing a reply.';
+      case 'seen':     return 'Finished, and you have read it.';
+      default:
+        return PROBELESS_SOURCES.indexOf(session.source) !== -1
+          ? 'No liveness signal — ' + agent + ' does not report whether it is working.'
+          : 'Nothing is happening in this session.';
+    }
+  }
+
+  /**
+   * The status marker: one element, distinguished by SHAPE first and colour second.
+   *
+   * Shape carries the meaning because an 8-10px dot has no room for detail, and because colour
+   * alone excludes anyone who cannot separate the hues — the CSS gives each state its own
+   * silhouette so the row still reads in a high-contrast theme. Motion is reserved for `working`:
+   * a marker that moves says "leave this alone", which is precisely the wrong thing to say about a
+   * session that is blocked waiting for you.
+   *
+   * @param {object} session
+   * @returns {HTMLElement}
+   */
+  function buildStatusIndicator(session) {
+    const status = session.status || 'dormant';
+    const el = document.createElement('span');
+    el.className = 'status-indicator status-' + status;
+    const tip = statusTooltip(session);
+    el.setAttribute('title', tip);
+    // The shape is the whole content, so a screen reader gets nothing without this.
+    el.setAttribute('role', 'img');
+    el.setAttribute('aria-label', tip);
     return el;
   }
 

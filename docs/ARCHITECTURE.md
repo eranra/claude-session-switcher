@@ -210,9 +210,15 @@ interface ClaudeSession {
   projectPath: string;  // full cwd
   title: string;        // ai-title if available, else first user message (≤60 chars)
   updatedAt: Date;      // file mtime
-  status: 'idle' | 'waiting' | 'active';
+  // Whose turn it is, and why. Six states, derived in `sessionStatus.ts`.
+  status: 'approval' | 'question' | 'finished' | 'working' | 'seen' | 'dormant';
 }
 ```
+
+Status is derived by [`sessionStatus.ts`](../src/sessionStatus.ts) — a pure module with no `vscode`,
+no I/O and no clock of its own, so all six states are unit-testable. `SessionManager` does the
+reading (the transcript tail, the Bob rows); that module does the deciding. Every rule, per agent,
+is documented in [`STATUS-INDICATORS.md`](STATUS-INDICATORS.md).
 
 ### `SessionSitterViewProvider`
 
@@ -233,11 +239,18 @@ Implements `WebviewViewProvider`. Wires `SessionManager` events and the VS Code 
 | `addFromHistory` | `claude-vscode.primaryEditor.open(sessionId)` |
 | `setSessionSort` | Validate the mode, write `sessionSitter.sessionSort` (global), re-push both lists |
 
+The provider also owns the **display status**: it folds a live pending approval (from
+`PendingWatcher`) and your last-viewed stamps (from `context.globalState`) into each session's
+state, once, on the way out — so the worklist filter, the sort and the row can never disagree about
+a session. A live signal may upgrade a state; its absence never downgrades one, because the probe
+only sees its own window.
+
 **Session list logic:**
 ```
 1. Check VS Code tabs for claudeVSCodePanel viewType → if matches found, show those
 2. Otherwise: call getActiveSessionIds() → show sessions with live PIDs
-3. Fallback: sessions with status != idle or modified < 2h
+3. Fallback: status is 'approval'/'question' (any age — blocked, not stale),
+   or 'working' and modified < 2h
 ```
 
 ### Webview (`main.js` + `styles.css`)
@@ -501,8 +514,13 @@ that is decided depends on what each source can actually tell us:
 
 For Bob and Claude the answer is read fresh from this window and unioned with what other live
 windows published to `~/.claude/session-sitter/windows/` — so the answer is cross-window. A
-session is also treated as active when its status is not idle, so a session you are working in
-does not vanish because the probe was momentarily silent.
+`working` session is also treated as active, so a session you are working in does not vanish because
+the probe was momentarily silent.
+
+A session **blocked on you** — `approval` or `question` — is kept at any age, with no staleness
+bound at all. It is stuck, not stale, and filing it under History hides the one row you have to act
+on. The bound exists to drop abandoned mid-turn transcripts, whose status is read from a file that
+will never change again.
 
 That registry is per-machine, because `os.homedir()` is. Sessions on *other* machines arrive
 through a separate path — see **Cross-machine sessions** below — and each carries a `peer` tag so

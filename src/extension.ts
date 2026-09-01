@@ -6,6 +6,7 @@ import { SessionSitterViewProvider } from './SessionSitterViewProvider';
 import { InspectorBobSender, type AutoRespondRule } from './agents/BobSender';
 import { InspectorBobApprover, type PendingApproval } from './agents/BobApprover';
 import { AutoResponder } from './AutoResponder';
+import { PendingWatcher } from './PendingWatcher';
 import {
   dumpClaudeManagerShape,
   dumpClaudeSendApprovalShape,
@@ -69,16 +70,29 @@ export function activate(context: vscode.ExtensionContext) {
   log(`Session Sitter activated — build v${BUILD_VERSION} @ ${BUILD_TIME}`);
   log(`state dir: ${stateDir}${state.explicit ? '' : ' (default — set sessionSitter.supervisorStateDir to move it)'}`);
 
-  const provider = new SessionSitterViewProvider(
-    context.extensionUri, sessionManager, log, stateDir);
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(SessionSitterViewProvider.viewType, provider),
-  );
-
   const sender = new InspectorBobSender(log);
   const approver = new InspectorBobApprover(log);
   const claudeSender = new InspectorClaudeSender(log);
   const claudeApprover = new InspectorClaudeApprover(log);
+
+  // Which Bob tasks are sitting on a prompt right now. The panel reads this to mark a row as
+  // blocked on you rather than busy — see PendingWatcher for why Claude is not in it.
+  const pendingWatcher = new PendingWatcher(approver, log);
+
+  const provider = new SessionSitterViewProvider(
+    context.extensionUri, sessionManager, log, stateDir,
+    // Global, not workspace: the same session list appears in every window, so "I have read this"
+    // must mean the same thing in all of them.
+    context.globalState,
+    () => pendingWatcher.snapshot());
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(SessionSitterViewProvider.viewType, provider),
+  );
+
+  // Repaint as soon as a prompt appears or is answered, rather than waiting for the next scan.
+  pendingWatcher.setOnChange(() => provider.refresh());
+  pendingWatcher.start();
+  context.subscriptions.push({ dispose: () => pendingWatcher.dispose() });
 
   // ── Commands ──────────────────────────────────────────────────────────────
 

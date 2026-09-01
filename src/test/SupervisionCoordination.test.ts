@@ -31,7 +31,7 @@ class FakeApprover implements BobApprover {
 }
 
 function session(id: string, projectPath: string): ClaudeSession {
-  return { sessionId: id, projectName: 'p', projectPath, title: 't', updatedAt: new Date(), status: 'active', source: 'bob' };
+  return { sessionId: id, projectName: 'p', projectPath, title: 't', updatedAt: new Date(), status: 'working', source: 'bob' };
 }
 
 function managerWith(sessions: ClaudeSession[]) {

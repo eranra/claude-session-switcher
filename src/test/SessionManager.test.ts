@@ -140,15 +140,15 @@ describe('SessionManager._parseSessionFile', () => {
   });
 
   describe('status detection', () => {
-    it('new session: last record is user → status = waiting', async () => {
+    it('new session: last record is a user prompt → working', async () => {
       const file = await writeTempJsonl(tmpDir, 'new-session', [
         { type: 'user', cwd: '/p', message: { content: 'test a new session' } },
       ]);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('waiting');
+      expect(result?.status).toBe('working');
     });
 
-    it('completed session: last record is assistant, old file → status = idle', async () => {
+    it('completed session: last record is assistant, old file → finished', async () => {
       const file = await writeTempJsonl(tmpDir, 'done-session', [
         { type: 'user', cwd: '/p', message: { content: 'do something' } },
         { type: 'assistant', message: { content: 'done' } },
@@ -157,20 +157,20 @@ describe('SessionManager._parseSessionFile', () => {
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(file, old, old);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('idle');
+      expect(result?.status).toBe('finished');
     });
 
-    it('recent assistant record → status = active (mid-task heuristic)', async () => {
+    it('recent assistant record → working (still streaming)', async () => {
       const file = await writeTempJsonl(tmpDir, 'recent-assistant', [
         { type: 'user', cwd: '/p', message: { content: 'do something' } },
         { type: 'assistant', message: { content: 'working...' } },
       ]);
-      // File is freshly written (within 30 s) → report active, not idle.
+      // File is freshly written (within 30 s) → still working, not finished.
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('active');
+      expect(result?.status).toBe('working');
     });
 
-    it('assistant with tool_use in content → status = active (tools executing)', async () => {
+    it('assistant tool_use that went quiet → approval, not a running tool', async () => {
       const file = await writeTempJsonl(tmpDir, 'tool-in-content', [
         { type: 'user', cwd: '/p', message: { content: 'run bash' } },
         {
@@ -183,33 +183,35 @@ describe('SessionManager._parseSessionFile', () => {
           },
         },
       ]);
-      // Back-date so recency heuristic doesn't interfere
+      // Quiet for 60 s with an unanswered tool call. A tool that is really executing keeps the
+      // transcript moving; one sitting on a permission prompt writes nothing — so this is the
+      // session that used to spin green forever while actually waiting on the user.
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(file, old, old);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('active');
+      expect(result?.status).toBe('approval');
     });
 
-    it('tool running: last record is tool_use → status = active', async () => {
+    it('tool running: a fresh tool_use record → working', async () => {
       const file = await writeTempJsonl(tmpDir, 'active-session', [
         { type: 'user', cwd: '/p', message: { content: 'run a tool' } },
         { type: 'tool_use', id: 't1', name: 'bash', input: {} },
       ]);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('active');
+      expect(result?.status).toBe('working');
     });
 
-    it('tool result received: last record is tool_result → status = active', async () => {
+    it('tool result received: a fresh tool_result → working', async () => {
       const file = await writeTempJsonl(tmpDir, 'active-session-2', [
         { type: 'user', cwd: '/p', message: { content: 'run a tool' } },
         { type: 'tool_use', id: 't1', name: 'bash', input: {} },
         { type: 'tool_result', tool_use_id: 't1', content: 'output' },
       ]);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('active');
+      expect(result?.status).toBe('working');
     });
 
-    it('only unknown tail record types fall through to idle', async () => {
+    it('walks backward past unknown tail record types', async () => {
       // File has a user record for title extraction, but the tail window only
       // contains unknown record types — scanner finds none of the known types
       // and defaults to idle.
@@ -222,13 +224,14 @@ describe('SessionManager._parseSessionFile', () => {
       // tail has no user/assistant/tool_use/tool_result records.  Verify the
       // scan-backward-past-unknown behavior instead:
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('waiting'); // user record is the last known
+      expect(result?.status).toBe('working'); // user record is the last known
     });
 
     // ── Not every `type: "user"` record is the user typing a prompt ─────────────
     // Claude Code writes tool results and synthetic markers as user-type records too.
-    // Treating those as "user sent a message, no reply yet" pins a finished session at
-    // 'waiting' forever, which keeps it in the active worklist for weeks.
+    // Treating those as "user sent a message, no reply yet" pins a finished session in the
+    // active worklist for weeks; skipping past a tool result is worse, because the walk then
+    // reaches the call it answered and reports a completed call as a pending approval.
 
     it('interrupted session: synthetic [Request interrupted by user] is not a prompt', async () => {
       const file = await writeTempJsonl(tmpDir, 'interrupted-session', [
@@ -239,7 +242,7 @@ describe('SessionManager._parseSessionFile', () => {
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(file, old, old);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('idle');
+      expect(result?.status).toBe('finished');
     });
 
     it('interrupted session: the "for tool use" variant is not a prompt either', async () => {
@@ -251,10 +254,10 @@ describe('SessionManager._parseSessionFile', () => {
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(file, old, old);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('idle');
+      expect(result?.status).toBe('finished');
     });
 
-    it('reaches the last-prompt terminal marker past a trailing interrupt record', async () => {
+    it('a month-old transcript ending on an interrupt does not read as pending', async () => {
       // The exact real-world shape that kept a month-old session in the active list:
       // assistant tool_use -> tool-result user record -> last-prompt -> interrupt marker.
       const file = await writeTempJsonl(tmpDir, 'real-world-stale', [
@@ -274,7 +277,7 @@ describe('SessionManager._parseSessionFile', () => {
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(file, old, old);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('idle');
+      expect(result?.status).toBe('finished');
     });
 
     it('injected isMeta record is not a prompt', async () => {
@@ -287,11 +290,12 @@ describe('SessionManager._parseSessionFile', () => {
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(file, old, old);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('idle');
+      expect(result?.status).toBe('finished');
     });
 
-    it('a tool-result user record still reads as active mid-tool', async () => {
-      // Not a prompt, but the assistant tool_use behind it means work is in flight.
+    it('a tool result that came back and then went quiet is dormant, not busy', async () => {
+      // The result answered the call above it, so nothing is pending — and nothing has been
+      // written for a minute, so nothing is running either. It is an abandoned turn.
       const file = await writeTempJsonl(tmpDir, 'tool-result-user-record', [
         { type: 'user', cwd: '/p', message: { content: 'run a tool' } },
         {
@@ -307,23 +311,48 @@ describe('SessionManager._parseSessionFile', () => {
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(file, old, old);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('active');
+      expect(result?.status).toBe('dormant');
     });
 
-    it('a real user prompt after an interrupt still reads as waiting', async () => {
+    it('a real user prompt after an interrupt reads as working', async () => {
       const file = await writeTempJsonl(tmpDir, 'reprompt-session', [
         { type: 'user', cwd: '/p', message: { content: 'do something' } },
         { type: 'assistant', message: { content: 'on it' } },
         { type: 'user', message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] } },
         { type: 'user', message: { content: 'actually do this instead' } },
       ]);
+      // Inside the two-minute prompt window: the agent has not answered yet, but may still.
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(file, old, old);
       const result = await manager._parseSessionFile(file);
-      expect(result?.status).toBe('waiting');
+      expect(result?.status).toBe('working');
     });
 
-    it('no known record types at all defaults to idle', async () => {
+    it('a prompt nobody ever answered eventually goes quiet', async () => {
+      const file = await writeTempJsonl(tmpDir, 'abandoned-prompt', [
+        { type: 'user', cwd: '/p', message: { content: 'do something' } },
+      ]);
+      const old = new Date(Date.now() - 10 * 60_000);
+      await fs.promises.utimes(file, old, old);
+      const result = await manager._parseSessionFile(file);
+      expect(result?.status).toBe('dormant');
+    });
+
+    it('an unanswered question reads as a question however long it has waited', async () => {
+      const file = await writeTempJsonl(tmpDir, 'question-session', [
+        { type: 'user', cwd: '/p', message: { content: 'which one?' } },
+        {
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', id: 'q1', name: 'AskUserQuestion', input: {} }] },
+        },
+      ]);
+      const old = new Date(Date.now() - 3 * 3600_000);
+      await fs.promises.utimes(file, old, old);
+      const result = await manager._parseSessionFile(file);
+      expect(result?.status).toBe('question');
+    });
+
+    it('no known record types at all defaults to dormant', async () => {
       // Construct a session whose first user record appears early (so we get
       // a title), but whose tail contains only unrecognised record types.
       // We achieve this by writing the user line first, then appending enough
@@ -345,7 +374,7 @@ describe('SessionManager._parseSessionFile', () => {
       const old = new Date(Date.now() - 60_000);
       await fs.promises.utimes(filePath, old, old);
       const result = await manager._parseSessionFile(filePath);
-      expect(result?.status).toBe('idle');
+      expect(result?.status).toBe('dormant');
     });
   });
 });
@@ -660,18 +689,18 @@ describe('SessionManager._scanBobSessions', () => {
     expect(sessions.find(s => s.sessionId === 'no-msg')).toBeUndefined();
   });
 
-  it('maps running status to active', async () => {
+  it('maps running status to working', async () => {
     insertBobTask(dbPath, { id: 'task-running', projectId: 'file:/proj', title: 'Running task', status: 'running', firstMessage: 'Running task', updatedAt: Date.now() });
     const sessions = await (sm as unknown as PrivateManagerBob)._scanBobSessions();
     const s = sessions.find(s => s.sessionId === 'task-running');
-    expect(s?.status).toBe('active');
+    expect(s?.status).toBe('working');
   });
 
-  it('maps active status to idle', async () => {
+  it("maps Bob's active status — which means finished — to finished", async () => {
     insertBobTask(dbPath, { id: 'task-idle', projectId: 'file:/proj', title: 'Done task', status: 'active', firstMessage: 'Done task', updatedAt: Date.now() });
     const sessions = await (sm as unknown as PrivateManagerBob)._scanBobSessions();
     const s = sessions.find(s => s.sessionId === 'task-idle');
-    expect(s?.status).toBe('idle');
+    expect(s?.status).toBe('finished');
   });
 
   it('extracts projectPath from env.staticEnvInfo.primaryWorkspace', async () => {
@@ -795,7 +824,8 @@ describe('SessionManager._scanCodexSessions', () => {
       projectPath: '/home/u/proj',
       projectName: 'proj',
       source: 'codex',
-      status: 'idle',
+      // No liveness signal exists for Codex, so we say so rather than implying it finished.
+      status: 'dormant',
     });
     expect(results[0].updatedAt.toISOString()).toBe('2026-07-13T10:05:00.000Z');
   });
@@ -913,7 +943,7 @@ describe('SessionManager.exportSessionAsJson (Codex)', () => {
 
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: 'cx-e', projectPath: '/x', projectName: 'x',
-      title: 't', updatedAt: new Date(), status: 'idle', source: 'codex',
+      title: 't', updatedAt: new Date(), status: 'seen', source: 'codex',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set('cx-e', rollout);
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })
@@ -979,7 +1009,7 @@ describe('SessionManager._scanChatSessions', () => {
       projectPath: '/home/u/my-proj',
       projectName: 'my-proj',
       source: 'chat',
-      status: 'idle',
+      status: 'dormant',
     });
   });
 
@@ -1085,7 +1115,7 @@ describe('SessionManager.exportSessionAsJson (Chat)', () => {
 
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: 'ce-1', projectPath: '/x', projectName: 'x',
-      title: 'hi', updatedAt: new Date('2026-07-13T10:00:00Z'), status: 'idle', source: 'chat',
+      title: 'hi', updatedAt: new Date('2026-07-13T10:00:00Z'), status: 'seen', source: 'chat',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set('ce-1', chatFile);
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })
@@ -1205,7 +1235,7 @@ describe('SessionManager.exportFullTranscript (Codex)', () => {
 
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: 'cx-full', projectPath: '/x', projectName: 'x',
-      title: 'Codex conversation', updatedAt: new Date('2026-07-20T10:00:06Z'), status: 'idle', source: 'codex',
+      title: 'Codex conversation', updatedAt: new Date('2026-07-20T10:00:06Z'), status: 'seen', source: 'codex',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set('cx-full', rollout);
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })
@@ -1234,7 +1264,7 @@ describe('SessionManager.exportFullTranscript (Codex)', () => {
 
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: 'cx-2', projectPath: '/x', projectName: 'x',
-      title: 't', updatedAt: new Date(), status: 'idle', source: 'codex',
+      title: 't', updatedAt: new Date(), status: 'seen', source: 'codex',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set('cx-2', rollout);
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })
@@ -1282,7 +1312,7 @@ describe('SessionManager.exportFullTranscript (Claude)', () => {
 
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: 'cl-full', projectPath: '/x', projectName: 'x',
-      title: 'A Claude chat', updatedAt: new Date('2026-07-20T10:00:03Z'), status: 'idle', source: 'claude',
+      title: 'A Claude chat', updatedAt: new Date('2026-07-20T10:00:03Z'), status: 'seen', source: 'claude',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set('cl-full', sessionFile);
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })
@@ -1310,7 +1340,7 @@ describe('SessionManager.exportFullTranscript (Claude)', () => {
 
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: 'cl-2', projectPath: '/x', projectName: 'x',
-      title: 't', updatedAt: new Date(), status: 'idle', source: 'claude',
+      title: 't', updatedAt: new Date(), status: 'seen', source: 'claude',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set('cl-2', sessionFile);
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })
@@ -1355,7 +1385,7 @@ describe('SessionManager.exportFullTranscript (Bob)', () => {
 
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: id, projectPath: '/proj', projectName: 'proj',
-      title: 'Bob conversation', updatedAt: new Date(7_000), status: 'idle', source: 'bob',
+      title: 'Bob conversation', updatedAt: new Date(7_000), status: 'seen', source: 'bob',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set(id, id);
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })
@@ -1404,7 +1434,7 @@ describe('SessionManager.exportFullTranscript (Chat)', () => {
 
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: 'ch-full', projectPath: '/x', projectName: 'x',
-      title: 'A Chat conversation', updatedAt: new Date(1_753_000_000_000), status: 'idle', source: 'chat',
+      title: 'A Chat conversation', updatedAt: new Date(1_753_000_000_000), status: 'seen', source: 'chat',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set('ch-full', chatFile);
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })
@@ -1422,7 +1452,7 @@ describe('SessionManager.exportFullTranscript (Chat)', () => {
   it('returns a zero-turn transcript when the file cannot be read', async () => {
     (sm as unknown as { _sessions: import('../SessionManager').ClaudeSession[] })._sessions = [{
       sessionId: 'ch-missing', projectPath: '/x', projectName: 'x',
-      title: 't', updatedAt: new Date(), status: 'idle', source: 'chat',
+      title: 't', updatedAt: new Date(), status: 'seen', source: 'chat',
     }];
     (sm as unknown as { _sessionFilePaths: Map<string, string> })._sessionFilePaths.set('ch-missing', '/nonexistent/foo.jsonl');
     (sm as unknown as { _sessionSources: Map<string, 'claude' | 'bob' | 'codex' | 'chat'> })

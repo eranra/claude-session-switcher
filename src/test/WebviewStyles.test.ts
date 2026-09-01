@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import { SESSION_STATUSES } from '../sessionStatus';
 
 // The webview toggles panel visibility via the `hidden` attribute
 // (e.g. `historyPanel.hidden = !open` in main.js). Elements like
@@ -97,5 +98,66 @@ describe('webview: the coloured workspace pill', () => {
   it('styles the class it marks a coloured pill with', () => {
     expect(main).toContain('tab-badge--colored');
     expect(css).toMatch(/\.tab-badge--colored\s*\{/);
+  });
+});
+
+// The webview is plain JS with no DOM under test, so what is checkable here is the contract between
+// the three files that must agree about the six status states: `sessionStatus.ts` names them,
+// main.js builds a class per state, and styles.css styles every class it builds. A state added on
+// one side and forgotten on another is silent at runtime — the marker simply renders as an
+// unstyled empty span, which looks like no status at all.
+describe('webview: the six status markers', () => {
+  const dir = path.join(__dirname, '..', 'webview');
+  const main = fs.readFileSync(path.join(dir, 'main.js'), 'utf8');
+  const css = fs.readFileSync(path.join(dir, 'styles.css'), 'utf8');
+
+  it('styles every state the status module defines', () => {
+    for (const status of SESSION_STATUSES) {
+      expect(css).toMatch(new RegExp(`\\.status-${status}\\b`));
+    }
+  });
+
+  it('names every state in a tooltip, so no marker is unexplained', () => {
+    // Four are matched by their own case label; `seen` and `dormant` share the switch's default
+    // path, so they are checked by the text they produce.
+    for (const status of ['approval', 'question', 'finished', 'working']) {
+      expect(main).toContain(`case '${status}':`);
+    }
+    expect(main).toContain('you have read it');
+    expect(main).toContain('No liveness signal');
+  });
+
+  it('builds the class name styles.css defines, from the session status', () => {
+    expect(main).toContain("'status-indicator status-' + status");
+  });
+
+  it('gives the marker an accessible name — the shape is its only content', () => {
+    expect(main).toContain("setAttribute('role', 'img')");
+    expect(main).toContain("setAttribute('aria-label'");
+  });
+
+  it('animates only the working state', () => {
+    // Motion reads as "busy, leave it alone", which is the wrong thing to say about a session
+    // blocked waiting for you. Only `working` may move.
+    const animated = [...css.matchAll(/\.status-([a-z]+)\s*\{([^}]*)\}/g)]
+      .filter(m => /animation\s*:\s*[a-z]/.test(m[2]) && !/animation\s*:\s*none/.test(m[2]))
+      .map(m => m[1]);
+    expect(animated).toEqual(['working']);
+  });
+
+  it('honours prefers-reduced-motion', () => {
+    const normalized = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(normalized).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+    // Inside that block, the spinner must actually be stopped.
+    const block = normalized.slice(normalized.indexOf('prefers-reduced-motion'));
+    expect(block).toMatch(/animation\s*:\s*none/);
+  });
+
+  it('separates seen from dormant by shape, not only by opacity', () => {
+    // Both are quiet states, but they mean different things — "finished, you read it" versus
+    // "nothing is happening, or we cannot tell". Two dim dots would rebuild the ambiguity the
+    // six-state set exists to remove, so `dormant` must be an outline.
+    const dormant = css.slice(css.indexOf('.status-dormant'));
+    expect(dormant.slice(0, dormant.indexOf('}'))).toMatch(/border\s*:/);
   });
 });

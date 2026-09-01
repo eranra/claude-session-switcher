@@ -120,7 +120,7 @@ import type { BobSender } from '../agents/BobSender';
 import type { BobApprover } from '../agents/BobApprover';
 import type { ClaudeSession } from '../SessionManager';
 
-function bobSession(id: string, status: ClaudeSession['status'] = 'idle', projectPath = '/p'): ClaudeSession {
+function bobSession(id: string, status: ClaudeSession['status'] = 'seen', projectPath = '/p'): ClaudeSession {
   return { sessionId: id, projectName: 'p', projectPath, title: 't',
     updatedAt: new Date(), status, source: 'bob' };
 }
@@ -322,7 +322,7 @@ describe('AutoResponder session-scoped rules', () => {
     } as any;
   }
   function bobSess(id: string, projectPath: string): ClaudeSession {
-    return { sessionId: id, projectName: 'p', projectPath, title: 't', updatedAt: new Date(), status: 'active', source: 'bob' };
+    return { sessionId: id, projectName: 'p', projectPath, title: 't', updatedAt: new Date(), status: 'working', source: 'bob' };
   }
 
   it('approval rule scoped by sessionPattern fires only on the matching project', async () => {
@@ -344,14 +344,14 @@ describe('AutoResponder session-scoped rules', () => {
     const ex = { s: [{ role: 'assistant', text: 'please continue', timestamp: 'T1' }] };
     const sender = new FakeSender();
     const r = new AutoResponder(fakeManager(ex), sender, () => rules, () => {});
-    await r.evaluateSession(bobSession('s', 'idle', '/home/me/other'));   // no match → no fire
+    await r.evaluateSession(bobSession('s', 'seen', '/home/me/other'));   // no match → no fire
     expect(sender.calls.length).toBe(0);
-    await r.evaluateSession(bobSession('s', 'idle', '/home/me/session-sitter/x')); // match → fires
+    await r.evaluateSession(bobSession('s', 'seen', '/home/me/session-sitter/x')); // match → fires
     expect(sender.calls.length).toBe(1);
   });
 });
 
-function claudeSession(id: string, status: ClaudeSession['status'] = 'idle', projectPath = '/p'): ClaudeSession {
+function claudeSession(id: string, status: ClaudeSession['status'] = 'seen', projectPath = '/p'): ClaudeSession {
   return { sessionId: id, projectName: 'p', projectPath, title: 't', updatedAt: new Date(), status, source: 'claude' };
 }
 

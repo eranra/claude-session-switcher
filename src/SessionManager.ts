@@ -14,6 +14,11 @@ import {
 import { REMOTE_FOCUS_PY } from './remote/remoteFocus';
 import type { WindowEntry } from './WindowRegistry';
 import { FullTranscript, readBobTranscript } from './SessionExporter';
+import {
+  claudeStatusFromTail,
+  type JsonlRecord,
+  type SessionStatus,
+} from './sessionStatus';
 
 /**
  * How often peer machines are re-probed. Slower than the 5 s local poll on purpose: each pass is
@@ -91,62 +96,14 @@ export interface ClaudeSession {
   projectPath: string;  // full cwd from first user record
   title: string;        // AI-generated title if available, otherwise first user message (≤60 chars)
   updatedAt: Date;      // file mtime (last write time)
-  status: 'idle' | 'waiting' | 'active'; // idle=done, waiting=user sent/no reply yet, active=tools running
+  // Whose turn it is, and why. Derived in `sessionStatus.ts`; see docs/STATUS-INDICATORS.md.
+  status: SessionStatus;
   source: 'claude' | 'bob' | 'codex' | 'chat'; // which AI IDE this session belongs to
   // Set only when this session lives on another machine, to the peer that owns it
   // ("user@host"). Absent means local — so every existing local code path is unaffected.
   peer?: string;
 }
 
-interface ContentBlock {
-  type?: string;
-  text?: string;
-}
-
-interface JsonlRecord {
-  type?: string;
-  cwd?: string;
-  aiTitle?: string;     // present in ai-title records written by Claude Code
-  timestamp?: string;
-  isMeta?: boolean;     // injected context (skill loads, scheduled prompts), not user typing
-  toolUseResult?: unknown; // present on the user-type records that carry tool results
-  message?: {
-    content?: string | ContentBlock[];
-  };
-}
-
-// Synthetic text Claude Code writes into a user-type record when you interrupt it. A marker,
-// not a prompt: a session whose transcript ends on one is finished, not awaiting a reply.
-const INTERRUPT_MARKERS: ReadonlySet<string> = new Set([
-  '[Request interrupted by user]',
-  '[Request interrupted by user for tool use]',
-]);
-
-// The plain text of a record's message, joining text blocks.
-function recordText(record: JsonlRecord): string {
-  const content = record.message?.content;
-  if (typeof content === 'string') { return content.trim(); }
-  if (!Array.isArray(content)) { return ''; }
-  return content
-    .filter(b => b?.type === 'text' && typeof b.text === 'string')
-    .map(b => b.text as string)
-    .join('')
-    .trim();
-}
-
-// Is a `type: 'user'` record the user actually typing a prompt?
-//
-// Claude Code writes several other things as user-type records: every tool result (carrying
-// `toolUseResult` and a tool_result block), injected context such as skill loads and scheduled
-// prompts (`isMeta`), and interrupt markers. Counting those as a fresh prompt pins a finished
-// session at 'waiting' forever, which keeps it in the active worklist for weeks.
-function isUserPrompt(record: JsonlRecord): boolean {
-  if (record.isMeta === true) { return false; }
-  if (record.toolUseResult !== undefined) { return false; }
-  const content = record.message?.content;
-  if (Array.isArray(content) && content.some(b => b?.type === 'tool_result')) { return false; }
-  return !INTERRUPT_MARKERS.has(recordText(record));
-}
 
 // Read ~/.claude/sessions/*.json and return session IDs whose Claude process
 // is still running. Each file stores the PID and the kernel start-time
@@ -903,7 +860,10 @@ export class SessionManager implements vscode.Disposable {
           projectName: cwd ? path.basename(cwd) : '',
           title,
           updatedAt,
-          status: 'idle',
+          // Codex exposes no liveness signal of any kind — no extension host to ask, nothing in
+          // the rollout that says whether it is mid-turn. 'dormant' is the honest answer, and its
+          // tooltip says so rather than implying the session is finished.
+          status: 'dormant',
           source: 'codex',
         });
       } catch { /* skip malformed rollout */ }
@@ -1329,7 +1289,8 @@ export class SessionManager implements vscode.Disposable {
             projectName,
             title,
             updatedAt: stat.mtime,
-            status: 'idle',
+            // Same as Codex: no liveness signal to read, so we do not pretend to have one.
+            status: 'dormant',
             source: 'chat',
           });
         } catch { /* skip malformed chat file */ }
@@ -1477,24 +1438,22 @@ export class SessionManager implements vscode.Disposable {
     }
   }
 
-  // Infer session status from the tail of the JSONL file.
-
-  //
-  // Status semantics:
-  //   'idle'    — Claude is done, session is waiting for the user to act
-  //   'waiting' — user sent a message, Claude has not yet started responding
-  //   'active'  — Claude is generating a response or executing tools
-  //
-  // Gray (idle) should mean "nothing is happening, your turn". Green (active)
-  // should cover everything Claude is actively doing.
+  /**
+   * Read the tail of a Claude transcript and hand it to the classifier.
+   *
+   * Split deliberately: this method does the I/O — how much of the file to read, how to survive a
+   * partial line at the window's edge — and `claudeStatusFromTail` does the deciding. All six
+   * states are then unit-testable without a transcript on disk, and the rules live in one file
+   * next to Bob's, instead of buried in a private method here.
+   */
   private async _readStatus(
     fh: Awaited<ReturnType<typeof fs.promises.open>>,
     fileSize: number,
     updatedAt: Date,
-  ): Promise<'idle' | 'waiting' | 'active'> {
-    if (fileSize === 0) {
-      return 'idle';
-    }
+  ): Promise<SessionStatus> {
+    // Nothing has been written yet, so there is nothing to claim about it.
+    if (fileSize === 0) { return 'dormant'; }
+
     const TAIL = 32768; // 32 KB covers large file-history-snapshot records
     const offset = Math.max(0, fileSize - TAIL);
     const size = fileSize - offset;
@@ -1502,54 +1461,16 @@ export class SessionManager implements vscode.Disposable {
     const { bytesRead } = await fh.read(buf, 0, size, offset);
     const chunk = buf.subarray(0, bytesRead).toString('utf8');
 
-    // File modified in the last 30 s — Claude may be mid-stream even if the
-    // last JSONL record looks terminal.
-    const recentlyModified = (Date.now() - updatedAt.getTime()) < 30_000;
-
-    const lines = chunk.split('\n');
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const trimmed = lines[i].trim();
+    const records: JsonlRecord[] = [];
+    for (const line of chunk.split('\n')) {
+      const trimmed = line.trim();
       if (!trimmed) { continue; }
-      try {
-        const record = JSON.parse(trimmed) as JsonlRecord;
-
-        // Only a real prompt means "your turn is done, Claude's turn hasn't started". Tool
-        // results, injected context and interrupt markers are user-type records too — keep
-        // scanning backward past those.
-        if (record.type === 'user') {
-          if (isUserPrompt(record)) { return 'waiting'; }
-          continue;
-        }
-
-        if (record.type === 'tool_use' || record.type === 'tool_result') {
-          return 'active';
-        }
-
-        // Terminal records written at session end — session is done.
-        if (record.type === 'pr-link' || record.type === 'last-prompt') {
-          return 'idle';
-        }
-
-        if (record.type === 'assistant') {
-          // If the assistant message contains tool_use blocks, those tools are
-          // still executing — keep green regardless of recency.
-          const content = record.message?.content;
-          if (Array.isArray(content)) {
-            const hasToolUse = content.some(b => b?.type === 'tool_use');
-            if (hasToolUse) { return 'active'; }
-          }
-          // Pure text response: green if file is still being written (streaming),
-          // gray once the file has been quiet for 30+ seconds.
-          return recentlyModified ? 'active' : 'idle';
-        }
-
-        // Other record types (queue-operation, ai-title, file-history-snapshot)
-        // are not meaningful for status — keep scanning backward.
-      } catch {
-        // Partial line at the start of the tail window — skip
-      }
+      // The first line of the window is usually a fragment. Skipping unparsable lines is what
+      // makes reading a fixed-size tail safe.
+      try { records.push(JSON.parse(trimmed) as JsonlRecord); } catch { /* partial line */ }
     }
-    return recentlyModified ? 'active' : 'idle';
+
+    return claudeStatusFromTail(records, updatedAt.getTime(), Date.now());
   }
 }
 

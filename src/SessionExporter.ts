@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { queryBobDb } from './BobDatabase';
 import { PendingApproval } from './agents/BobApprover';
+import { bobStatus, isQuestionTool } from './sessionStatus';
 
 // ── Full-transcript export contract ──────────────────────────────────────────
 // This extension is the single reader of Bob/Claude sessions. It exports the full
@@ -135,8 +136,9 @@ export function pendingFromApproval(p: PendingApproval, agentLabel = 'Bob'): Exp
   try { args = JSON.parse(p.argsText); } catch { args = { _raw: p.argsText }; }
   // Both agents' question tools must map to 'question' so the supervisor relays them for a
   // real answer instead of auto-approving (an approved question with no selection makes the
-  // agent report "the user didn't provide any answer"). Mirrors derivePendingAction's isQuestion.
-  const isQuestion = p.toolName === 'ask_followup_question' || p.toolName === 'AskUserQuestion';
+  // agent report "the user didn't provide any answer"). One shared predicate with the status
+  // module, so the row's 'question' state and the supervisor's handling can never disagree.
+  const isQuestion = isQuestionTool(p.toolName);
   const kind: ExportPendingAction['kind'] = isQuestion ? 'question' : 'tool_call';
   return {
     kind,
@@ -195,7 +197,11 @@ export function buildTranscript(
   // A live approval read from Bob's memory (the true interrupt point) wins over what we can
   // infer from the DB, which lags behind an in-flight/blocked task.
   const pendingAction = livePending ? pendingFromApproval(livePending) : derivePendingAction(turns);
-  const status = task.status === 'running' ? 'active' : 'waiting';
+  // The same vocabulary the panel uses. This used to map a non-running task to 'waiting' while
+  // `bobRowToSession` mapped the identical row to 'idle', so the exported transcript and the row
+  // in the list disagreed about the very session the supervisor was being asked to judge.
+  const status = bobStatus(
+    task.status, pendingAction ? (pendingAction.kind === 'question' ? 'question' : 'approval') : undefined);
 
   return {
     schemaVersion: EXPORT_SCHEMA_VERSION,
@@ -228,7 +234,7 @@ export function derivePendingAction(turns: ExportTurn[]): ExportPendingAction | 
     // this turn is already resolved, keep looking further back.
     const call = [...t.toolCalls].reverse().find(c => !resolvedCallIds.has(c.id));
     if (!call) { continue; }
-    const isQuestion = call.name === 'ask_followup_question' || call.name === 'AskUserQuestion';
+    const isQuestion = isQuestionTool(call.name);
     const kind = isQuestion ? 'question' : 'tool_call';
     return {
       kind,

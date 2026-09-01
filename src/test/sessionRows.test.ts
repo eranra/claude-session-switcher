@@ -31,10 +31,17 @@ describe('bobRowToSession', () => {
     expect(bobRowToSession(row(), 'vpcuser@olap.ibm.com')?.peer).toBe('vpcuser@olap.ibm.com');
   });
 
-  it("treats Bob's 'running' as active and everything else as idle", () => {
+  it("treats Bob's 'running' as working and everything else as finished", () => {
     // Bob's 'active' means a finished task, which is the opposite of what the word suggests.
-    expect(bobRowToSession(row({ status: 'running' }))?.status).toBe('active');
-    expect(bobRowToSession(row({ status: 'active' }))?.status).toBe('idle');
+    expect(bobRowToSession(row({ status: 'running' }))?.status).toBe('working');
+    expect(bobRowToSession(row({ status: 'active' }))?.status).toBe('finished');
+  });
+
+  it('does not try to guess a blocked state the row cannot see', () => {
+    // `tasks.status` reads 'running' whether Bob is executing a tool or sitting on a permission
+    // prompt. Distinguishing those needs the live pending approval, which the view provider folds
+    // in — so this mapping must stay at 'working' rather than guessing.
+    expect(bobRowToSession(row({ status: 'running' }))?.status).toBe('working');
   });
 
   it('falls back to the first message when there is no title', () => {

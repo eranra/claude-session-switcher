@@ -7,7 +7,7 @@ import { buildClaudeTranscript, type ClaudeSessionMeta } from '../SessionExporte
 import type { PendingApproval } from '../agents/BobApprover';
 
 const session: ClaudeSessionMeta = {
-  sessionId: 'sess-1', projectName: 'session-sitter', projectPath: '/home/me/session-sitter', status: 'waiting', title: 'demo',
+  sessionId: 'sess-1', projectName: 'session-sitter', projectPath: '/home/me/session-sitter', status: 'working', title: 'demo',
 };
 
 function lines(...records: unknown[]): string[] {

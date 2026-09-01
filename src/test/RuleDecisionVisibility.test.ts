@@ -60,7 +60,7 @@ class FakeChannel implements MessagingChannel {
 function bobSession(id: string): ClaudeSession {
   return {
     sessionId: id, projectName: 'p', projectPath: '/p', title: 't',
-    updatedAt: new Date(), status: 'active', source: 'bob',
+    updatedAt: new Date(), status: 'working', source: 'bob',
   };
 }
 

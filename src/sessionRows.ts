@@ -1,5 +1,6 @@
 import * as path from 'path';
 import type { ClaudeSession } from './SessionManager';
+import { bobStatus } from './sessionStatus';
 
 /**
  * Turning raw agent-store rows into sessions.
@@ -28,6 +29,10 @@ export interface BobTaskRow {
  * Map one Bob task row to a session, or null when the row carries no usable title.
  *
  * `peer` tags a session that came from another machine; omit it for local rows.
+ *
+ * The status here is only what the row itself can support: `tasks.status` reads `running` whether
+ * Bob is executing a tool or sitting on a permission prompt, so it cannot tell those apart. A live
+ * pending approval is folded in later, once, by the view provider — see `resolveDisplayStatus`.
  */
 export function bobRowToSession(row: BobTaskRow, peer?: string): ClaudeSession | null {
   const title = (row.title || row.first_message || '').slice(0, 60);
@@ -40,8 +45,9 @@ export function bobRowToSession(row: BobTaskRow, peer?: string): ClaudeSession |
     projectPath,
     title,
     updatedAt: new Date(row.updated_at),
-    // Bob's 'running' means actively processing; its 'active' means a finished task.
-    status: row.status === 'running' ? 'active' : 'idle',
+    // Bob's 'running' means actively processing; its 'active' means a finished task. The rule,
+    // and that trap, live in sessionStatus.ts alongside Claude's.
+    status: bobStatus(row.status),
     source: 'bob',
   };
   if (peer) { session.peer = peer; }

@@ -15,13 +15,15 @@
  * Deliberately free of `vscode` and of any I/O, so it is pure and cheap to test.
  */
 
+import type { SessionStatus } from './sessionStatus';
+
 /** The subset of a session this module orders by. */
 export interface SortableSession {
   sessionId: string;
   projectName: string;
   title: string;
   updatedAt: Date;
-  status: string;
+  status: SessionStatus;
   source: string;
   /** "user@host" when the session lives on another machine; absent means this one. */
   peer?: string;
@@ -82,7 +84,7 @@ export const SESSION_SORT_MODES: readonly SessionSortOption[] = [
   {
     id: 'status',
     label: 'Needs you first',
-    description: 'Waiting, then running, then idle — newest first inside each group.',
+    description: 'Blocked on you, then unread, then working, then quiet — newest first in each group.',
     stable: false,
   },
 ];
@@ -127,11 +129,20 @@ function titleKey(s: SortableSession): string {
   return (s.title || '').toLowerCase();
 }
 
-/** Waiting on you, then running, then finished — most actionable first. */
-const STATUS_RANK: Record<string, number> = { waiting: 0, active: 1, idle: 2 };
+/**
+ * Most actionable first: the two states your input unblocks, then a result you have not read, then
+ * work in progress, then everything quiet.
+ *
+ * `approval` leads `question` because a blocked tool usually stalls a whole run, while a question
+ * has at least already told you what it needs. Keyed by every state, so adding a seventh fails to
+ * compile here rather than silently sorting last.
+ */
+const STATUS_RANK: Record<SessionStatus, number> = {
+  approval: 0, question: 1, finished: 2, working: 3, seen: 4, dormant: 5,
+};
 
 function statusRank(s: SortableSession): number {
-  return STATUS_RANK[s.status] ?? 3;
+  return STATUS_RANK[s.status] ?? STATUS_RANK.dormant;
 }
 
 /** Agent grouping order. Matches the badge order used elsewhere in the panel. */

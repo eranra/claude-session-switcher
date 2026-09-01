@@ -127,7 +127,28 @@ judged by what their extension hosts report as open, unioned across every window
 open in another window still appears here. Codex and Chat expose no such signal, so they count as
 active while recently updated. Everything else moves to History.
 
-Each row carries a status dot: 🟢 running tools · 🟡 waiting on the agent · ⚫ idle, waiting on you.
+### The marker on each row
+
+Every row carries a marker saying whose turn it is, and why.
+
+| Marker | Means | Your move |
+|---|---|---|
+| spinning green ring | Running a tool, or writing a reply | Nothing — it is busy |
+| solid amber arrow | Paused on a permission prompt | Approve or reject it |
+| amber question mark | Asked you a question | Answer it |
+| green dot in a ring | Finished, and you have not opened it since | Read the result |
+| small grey dot | Finished, and you have read it | Nothing |
+| hollow grey circle | Nothing happening, or no signal to tell | Nothing |
+
+Each state has its own shape, not only its own colour, so the row still reads at 10px and in a
+high-contrast theme. Only the working marker moves — a marker that animates says "leave this
+alone", which is the wrong thing to say about a session blocked waiting for you. Hover any marker
+for the reason in words. Sort by **Needs you first** (**⇅**) to put the blocked ones on top.
+
+A session waiting for your approval never ages out of the worklist: it is stuck, not stale.
+
+→ [`docs/STATUS-INDICATORS.md`](docs/STATUS-INDICATORS.md) for exactly how each state is decided,
+separately for Claude and Bob, and where the answer is inferred rather than known.
 
 ---
 
@@ -258,6 +279,7 @@ through the V8 inspector. → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 | Document | What it covers |
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, session detection, the supervision layer, the agent bridges |
+| [`docs/STATUS-INDICATORS.md`](docs/STATUS-INDICATORS.md) | the six row markers, and the rules that pick one — per agent |
 | [`docs/SUPERVISION.md`](docs/SUPERVISION.md) | the traffic lights, the lifecycle, the CLI, troubleshooting |
 | [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md) | the BDI schema, the three tiers, routing |
 | [`docs/CORPUS.md`](docs/CORPUS.md) | collecting sessions, bulk import, secret masking |

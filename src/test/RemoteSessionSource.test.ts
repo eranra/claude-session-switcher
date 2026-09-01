@@ -65,7 +65,7 @@ describe('RemoteSessionSource', () => {
     expect(sessions[0].source).toBe('bob');
     expect(sessions[0].peer).toBe('vpcuser@olap.ibm.com');
     // 'running' in Bob's schema means actively working.
-    expect(sessions[0].status).toBe('active');
+    expect(sessions[0].status).toBe('working');
     expect(sessions[0].projectPath).toBe('/home/vpcuser/proj');
   });
 
@@ -171,7 +171,7 @@ describe('RemoteSessionSource claude transcripts', () => {
       expect(fs.readFileSync(p, 'utf8')).toBe(transcript);
       return {
         sessionId: sid, projectName: 'proj', projectPath: '/home/vpcuser/proj',
-        title: 'hello', updatedAt: new Date(1788180000000), status: 'idle', source: 'claude',
+        title: 'hello', updatedAt: new Date(1788180000000), status: 'seen', source: 'claude',
       };
     });
 
@@ -225,7 +225,7 @@ describe('RemoteSessionSource claude transcripts', () => {
   it('reuses the previous session when the peer omits an unchanged transcript', async () => {
     const parseSessionFile = vi.fn(async (): Promise<ClaudeSession> => ({
       sessionId: sid, projectName: 'proj', projectPath: '/home/vpcuser/proj',
-      title: 'hello', updatedAt: new Date(1788180000000), status: 'idle', source: 'claude',
+      title: 'hello', updatedAt: new Date(1788180000000), status: 'seen', source: 'claude',
     }));
     const run = vi.fn()
       .mockResolvedValueOnce(claudePayload(gz))

@@ -16,6 +16,7 @@ import {
   type SessionSortMode,
 } from './sessionSort';
 import { resolveWorkspaceColor, type WorkspaceBadgeColor } from './workspaceColors';
+import { isBlockedOnYou, isWorklistSignal, resolveDisplayStatus } from './sessionStatus';
 
 // The Sessions view is a live worklist: only sessions the user can currently act on.
 // Everything else goes to History. Both partitions stay sorted by recency and capped.
@@ -28,12 +29,29 @@ const HISTORY_LIMIT = 50;
 const PROBELESS_SOURCES: ReadonlySet<string> = new Set(['codex', 'chat']);
 const DEFAULT_PROBELESS_ACTIVE_WINDOW_MINUTES = 120;
 
-// How long a non-idle status alone keeps a Claude/Bob session in the worklist when no probe
+// How long a `working` status alone keeps a Claude/Bob session in the worklist when no probe
 // reports it open. The fallback exists to survive a momentary probe failure (a WSL2 /
 // inspector hiccup), so it only needs to outlast the hiccup — not the session. Without a
 // bound, one abandoned mid-turn transcript sits in the worklist forever, because its status
 // is read from a file that will never change again.
+//
+// The two blocked-on-you states are exempt: a session waiting for your approval is not stale,
+// it is stuck, and moving it to History hides the one row you actually need to see.
 const STALE_FALLBACK_WINDOW_MS = 120 * 60_000;
+
+/** Key under which the last-viewed timestamps live in the extension's global state. */
+export const LAST_VIEWED_KEY = 'sessionSitter.lastViewed';
+
+/**
+ * How the panel learns about a live pending approval or question.
+ *
+ * Keyed by session id, so only agents whose pending approvals name their session can appear
+ * here. That is Bob: its approvals carry the owning task id. **Claude's do not** — they carry a
+ * comms channel id, and the channel-to-session mapping is not available (the same reason
+ * `AutoResponder` cannot honour `sessionPattern` for Claude rules). So a Claude session's
+ * blocked state is inferred from its transcript instead; see `sessionStatus.ts`.
+ */
+export type PendingBySession = ReadonlyMap<string, 'approval' | 'question'>;
 
 /**
  * A session as the webview receives it: the session itself plus whatever display decoration
@@ -73,6 +91,11 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
     private readonly _sessionManager: SessionManager,
     private readonly _log: (msg: string) => void = () => { /* no-op */ },
     stateDir = '',
+    // Where "you have already read this" is remembered, and how a live pending approval reaches
+    // the row. Both optional: without them the panel still works, it just cannot tell a result
+    // you have read from one you have not, and Bob rows fall back to their database status.
+    private readonly _memento?: vscode.Memento,
+    private readonly _pendingBySession?: () => PendingBySession,
   ) {
     this._recordsDir = stateDir ? path.join(stateDir, 'records') : '';
     this._focusWatcher = this._startFocusRequestWatcher();
@@ -169,6 +192,10 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
           case 'switchSession': {
             const sessionId = message.sessionId as string | undefined;
             if (!sessionId) { break; }
+            // You are looking at it now, so its result is no longer unread. Stamped on the click
+            // rather than on a successful focus: you have seen the row either way, and a failed
+            // window switch leaving it marked unread would just make the panel argue with you.
+            void this._markViewed(sessionId);
             void this._tryFocusForeignWindow(sessionId).then(result => {
               if (result === 'local') {
                 void this._openSessionLocal(sessionId);
@@ -208,6 +235,7 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
           case 'addFromHistory': {
             const sessionId = message.sessionId as string | undefined;
             if (!sessionId) { break; }
+            void this._markViewed(sessionId);
             const allSessions = this._sessionManager.getSessions();
             const histSession = allSessions.find(s => s.sessionId === sessionId);
             if (histSession?.source === 'bob') {
@@ -366,6 +394,15 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
     void removeWindowEntry(process.pid);
   }
 
+  /**
+   * Repaint both lists from the current state. For callers outside the panel — the pending-approval
+   * watcher especially, so a prompt shows up on the tick it appears rather than at the next scan.
+   */
+  public refresh(): void {
+    void this._pushSessions();
+    if (this._historyOpen) { void this._pushHistory(); }
+  }
+
   // Open a brand-new Claude conversation in the current window's editor.
   // `primaryEditor.open` with no sessionId creates a fresh panel in the active
   // editor column. We do NOT use `claude-vscode.newConversation` here: it only
@@ -499,13 +536,19 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
    *  - **Bob / Claude** — their extension hosts hold the truth. Bob reports its open task ids
    *    from the live `TaskManager`; Claude reports its open session ids from its manager. We
    *    read this window fresh and union it with what other live windows published to the
-   *    registry, so the answer is cross-window. A session is also treated as active when its
-   *    status is not idle, so one you are actively in still shows up if the probe is
-   *    momentarily silent (a WSL2 / inspector hiccup) — but only while it is recent, see
-   *    `STALE_FALLBACK_WINDOW_MS`. A live report from a probe is authoritative at any age.
+   *    registry, so the answer is cross-window. A session whose status is a live signal
+   *    (`working`, or blocked on you) is also treated as active, so one you are in still shows up
+   *    if the probe is momentarily silent (a WSL2 / inspector hiccup) — `working` only while it is
+   *    recent, see `STALE_FALLBACK_WINDOW_MS`; blocked-on-you at any age, because a session
+   *    waiting on your approval is stuck, not stale, and hiding it in History hides the one row
+   *    you need. A live report from a probe is authoritative at any age.
    *  - **Codex / VS Code Chat** — no extension host to ask, no liveness signal of any kind.
    *    Recency is the only honest proxy, so they count as active while updated within
    *    `sessionSitter.probelessActiveWindowMinutes`.
+   *
+   * The status each session is filtered and rendered by is the **display** status — the raw one
+   * with a live pending approval folded in and `finished` split by whether you have read it. It is
+   * resolved once, here, so the worklist, History and the row all agree about a session.
    *
    * Both partitions stay sorted by recency.
    */
@@ -536,13 +579,65 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
         ? bobOpenIds.has(s.sessionId)
         : claudeOpenIds.has(s.sessionId);
       if (reportedOpen) { return true; }
-      // Non-idle status is a fallback, not a live signal — it must not outlive its window.
-      return s.status !== 'idle'
+      // Blocked on you: stuck, not stale. No age bound — it stays until you deal with it.
+      if (isBlockedOnYou(s.status)) { return true; }
+      // Anything else is a fallback, not a live signal, so it must not outlive its window.
+      return isWorklistSignal(s.status)
         && s.updatedAt.getTime() >= Date.now() - STALE_FALLBACK_WINDOW_MS;
     };
 
-    const all = this._sortedByRecency();
+    const all = this._sortedByRecency().map(s => this._withDisplayStatus(s));
     return { active: all.filter(isActive), history: all.filter(s => !isActive(s)) };
+  }
+
+  /**
+   * Fold the live signals into a session's status: a pending approval read from the agent's host,
+   * and whether you have opened the session since it last changed.
+   *
+   * Done here rather than in the scan because both inputs are panel-side state — the pending map is
+   * polled by the extension, the last-viewed stamps are written when you click a row — and because
+   * doing it once, on the way out, is what keeps the worklist filter, the sort and the row from
+   * disagreeing about what a session is.
+   */
+  private _withDisplayStatus(session: ClaudeSession): ClaudeSession {
+    const status = resolveDisplayStatus(session.status, {
+      pending: this._pendingBySession?.().get(session.sessionId),
+      updatedAtMs: session.updatedAt.getTime(),
+      lastViewedMs: this._lastViewed()[session.sessionId],
+      nowMs: Date.now(),
+    });
+    return status === session.status ? session : { ...session, status };
+  }
+
+  /** When each session was last opened from the panel, by session id. */
+  private _lastViewed(): Record<string, number> {
+    return this._memento?.get<Record<string, number>>(LAST_VIEWED_KEY, {}) ?? {};
+  }
+
+  /**
+   * Record that you have now looked at a session, so its finished result stops asking for you.
+   *
+   * Pruned to the sessions currently known, because the panel would otherwise accumulate a
+   * timestamp per session opened for the lifetime of the install. A stamp dropped by the prune is
+   * harmless: the row it belonged to is already gone from both lists.
+   */
+  private async _markViewed(sessionId: string): Promise<void> {
+    if (!this._memento) { return; }
+    const known = new Set(this._sessionManager.getSessions().map(s => s.sessionId));
+    known.add(sessionId);
+    const next: Record<string, number> = {};
+    for (const [id, at] of Object.entries(this._lastViewed())) {
+      if (known.has(id)) { next[id] = at; }
+    }
+    next[sessionId] = Date.now();
+    try {
+      await this._memento.update(LAST_VIEWED_KEY, next);
+    } catch (err) {
+      // Losing a read-marker is cosmetic — the row stays bold. Never let it break opening.
+      this._log(`could not record last-viewed for ${sessionId}: ${String(err)}`);
+    }
+    await this._pushSessions();
+    if (this._historyOpen) { await this._pushHistory(); }
   }
 
   /** The order the user picked for the session list. */
