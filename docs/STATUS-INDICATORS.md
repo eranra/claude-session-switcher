@@ -37,8 +37,15 @@ the outline is what you actually recognise at a glance, and it keeps working for
 separate the colours and in a high-contrast theme where the palette is overridden.
 
 **Only `working` moves.** Anything that animates reads as "busy, leave it alone" — which is the
-worst possible thing to say about a session sitting blocked, waiting for you. If your system asks
-for reduced motion, the spinner becomes a static ring and stays just as readable.
+worst possible thing to say about a session sitting blocked, waiting for you.
+
+The `working` ring turns even if your system asks for reduced motion. That is a deliberate
+exception, and the only one: the turning *is* the signal. A stopped ring says nothing the other five
+shapes do not already say better, so stopping it does not simplify the marker — it deletes the
+difference between "busy right now" and "sitting there". On Windows, one switch controls this
+(**Settings → Accessibility → Visual effects → Animation effects**), and with it off every page the
+editor renders is told to reduce motion, this panel included. Honouring it here cost the panel its
+only liveness cue on a whole class of machines, with nothing on screen to say why.
 
 ### Why `seen` and `dormant` are different shapes
 
@@ -236,7 +243,7 @@ never change again.
 | [`src/PendingWatcher.ts`](../src/PendingWatcher.ts) | Polls Bob's live pending approvals into a session-id → blocked-state map. |
 | [`src/SessionSitterViewProvider.ts`](../src/SessionSitterViewProvider.ts) | Folds the live signals and your read-stamps into the state actually shown — once, so the worklist filter, the sort and the row always agree. |
 | [`src/webview/main.js`](../src/webview/main.js) | Builds the marker and its tooltip. |
-| [`src/webview/styles.css`](../src/webview/styles.css) | The six shapes, and the reduced-motion rule. |
+| [`src/webview/styles.css`](../src/webview/styles.css) | The six shapes, and the spin. |
 | [`src/sessionSort.ts`](../src/sessionSort.ts) | The **Needs you first** order. |
 
 Tests: [`src/test/sessionStatus.test.ts`](../src/test/sessionStatus.test.ts) pins every rule in the

@@ -5,6 +5,29 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.7 — The working ring turns again
+
+The `working` spinner was standing still on any machine with Windows animation effects switched off,
+and it was this panel's own stylesheet doing it. `@media (prefers-reduced-motion: reduce)` set
+`animation: none` on `.status-working` and filled in the ring's transparent top segment, so the
+marker rendered as a complete, static green circle — the one state in the set that is supposed to
+move, looking permanently like a state that never does.
+
+Windows drives that media query from a single switch: **Settings → Accessibility → Visual effects →
+Animation effects**. Off, and `SystemParametersInfo(SPI_GETCLIENTAREAANIMATION)` returns 0, which
+Chromium reports as `reduce` for every page it renders — including a VS Code webview, and including
+one whose workspace lives in WSL, because the editor's renderer is a Windows process. Nothing about
+the panel looked broken from the inside; the rule was doing exactly what it said.
+
+The carve-out is gone and the ring now turns unconditionally. The turning is the signal, not
+decoration: a stopped ring carries nothing the other five silhouettes do not carry better, so
+stopping it did not degrade the marker gracefully — it erased the difference between "busy right
+now" and "sitting there". The test that used to require the spinner be stopped now requires the
+opposite, and says why, so the rule cannot come back by accident.
+
+This is unrelated to the phase-anchoring fix in 0.8.4's predecessor, which was correct. A negative
+`animation-delay` cannot rescue an animation that was switched off before it started.
+
 ### 0.8.6 — Reach the topics the cleanup could not see
 
 0.8.4 made a session's topic get **deleted** when the session leaves the active list, and that works.

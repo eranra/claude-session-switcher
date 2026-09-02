@@ -357,7 +357,21 @@ button:focus-visible {
   line-height: 1;
 }
 
-/* working: a spinning ring. The only state that moves. */
+/*
+ * working: a spinning ring. The only state that moves.
+ *
+ * It turns unconditionally, including under `prefers-reduced-motion: reduce`. That is deliberate,
+ * and it is a reversal: this rule used to stop the rotation and fill in the ring's missing top
+ * segment, which left a complete, static green circle. Windows drives the media query from a single
+ * switch (Settings > Accessibility > Visual effects > Animation effects), and with it off Chromium
+ * reports `reduce` for everything it renders — the VS Code webview included — so the panel's one
+ * moving state silently became a state that never moves, with nothing on screen to explain it.
+ *
+ * The turning is the signal, not decoration. A static ring says only "this is the ring shape", and
+ * the other five states already carry their meaning in their own silhouettes. Stopping it removed
+ * the whole distinction between "busy right now" and "sitting there", which is the one thing this
+ * marker exists to show.
+ */
 .status-working {
   background: transparent;
   border: 2px solid var(--vscode-charts-green, #4caf50);
@@ -438,18 +452,6 @@ button:focus-visible {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
-}
-
-/*
- * Someone who asked the OS for less motion gets a static ring instead of a spinner. The state is
- * still legible — it is the only ring in the set — so nothing is lost but the animation.
- */
-@media (prefers-reduced-motion: reduce) {
-  .status-working {
-    animation: none;
-    border-top-color: var(--vscode-charts-green, #4caf50);
-    opacity: 0.8;
-  }
 }
 
 /* Close (×) button — right side, visible on hover */

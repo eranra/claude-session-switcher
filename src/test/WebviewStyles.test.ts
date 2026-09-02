@@ -145,12 +145,25 @@ describe('webview: the six status markers', () => {
     expect(animated).toEqual(['working']);
   });
 
-  it('honours prefers-reduced-motion', () => {
+  // The spinner used to stop under `prefers-reduced-motion: reduce`, and that is how it came to be
+  // reported as broken. Windows exposes one switch here — Settings > Accessibility > Visual effects
+  // > Animation effects — and turning it off makes Chromium report `reduce` for every page it
+  // renders, the VS Code webview included. On a machine with that switch off the marker was a
+  // complete, static green circle: the rule filled in the ring's missing top segment as well as
+  // stopping the rotation, so the one state that is supposed to move looked like a state that never
+  // does, with nothing on screen to say why.
+  //
+  // Turning is not decoration here — it is the whole signal. `working` is the only state in the set
+  // that animates, and a static ring carries no information that the other five shapes do not
+  // already carry better. So the carve-out is gone and the ring always turns.
+  it('keeps the working spinner turning even under prefers-reduced-motion', () => {
     const normalized = css.replace(/\/\*[\s\S]*?\*\//g, '');
-    expect(normalized).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
-    // Inside that block, the spinner must actually be stopped.
-    const block = normalized.slice(normalized.indexOf('prefers-reduced-motion'));
-    expect(block).toMatch(/animation\s*:\s*none/);
+    const reduced = normalized.match(
+      /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.status-working\s*\{([^}]*)\}/,
+    );
+    // Either there is no reduced-motion rule for the marker at all, or there is one that does not
+    // stop it. Both are fine; stopping it is not.
+    if (reduced) { expect(reduced[1]).not.toMatch(/animation\s*:\s*none/); }
   });
 
   it('separates seen from dormant by shape, not only by opacity', () => {

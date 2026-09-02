@@ -764,8 +764,7 @@
       // ring twitching in place rather than one turning.
       //
       // A negative delay starts the animation mid-cycle instead of postponing it, so each new
-      // element picks up the phase the one it replaced was at. Harmless under
-      // prefers-reduced-motion: there is no animation left to offset.
+      // element picks up the phase the one it replaced was at.
       el.style.animationDelay = '-' + ((Date.now() % SPIN_PERIOD_MS) / 1000) + 's';
     }
     const tip = statusTooltip(session);
