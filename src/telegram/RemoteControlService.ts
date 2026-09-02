@@ -46,7 +46,7 @@ import {
   claimCommand, dropCommand, expiredCommands, newCommandId, postCommand, postResult,
   readPendingCommands, takeResults, leasePath, sweep, type BusCommand,
 } from './bus';
-import { idleCloseMs, startupBlocker, type RemoteControlConfig } from './config';
+import { startupBlocker, type RemoteControlConfig } from './config';
 import { ForumApi, type ReplyMarkup } from './forum';
 import { classifyUpdate, decodeCallback, encodeCallback, type Intent } from './intent';
 import { ReaderLease, LEASE_RENEW_MS } from './lease';
@@ -55,7 +55,7 @@ import {
   fleetSignature, planMirror, renderFleetList, renderHelp, renderHistoryList, renderTopicHeader,
   renderWho, sessionLabel, topicName, type ListEntry,
 } from './render';
-import { TopicStore, topicsToClose, topicsToPrune, type TopicRecord } from './topics';
+import { TopicStore, topicsToDelete, type TopicRecord } from './topics';
 import { routeUpdate } from './updateRouter';
 
 /** Seconds `getUpdates` waits before returning empty, so a tap arrives near-instantly. */
@@ -250,7 +250,6 @@ export class RemoteControlService {
       }
       await this.refreshTopic(session, existing);
     }
-    await this.closeIdleTopics();
   }
 
   /** Create the topic and post its header. Returns the record, or null when creation failed. */
@@ -286,7 +285,6 @@ export class RemoteControlService {
       // what happens next, not a replay of everything that already happened.
       mirroredTurns: (await this.turnsOf(session.sessionId)).length,
       closed: false,
-      lastActivityAt: session.updatedAt.getTime(),
       openedAt: this.now(),
       createdAt: this.now(),
     };
@@ -305,8 +303,8 @@ export class RemoteControlService {
    *
    * Only ever called for a session that is currently active, so being active cannot itself be the
    * reason to reopen: a session open in a window stays active indefinitely, and reopening on that
-   * alone would fight `closeIdleTopics` — closed every quiet period, reopened on the next pass,
-   * forever. **New turns** are what earn a reopen, because they are the thing you would have missed.
+   * alone would undo a topic you closed by hand on every single pass. **New turns** are what earn a
+   * reopen, because they are the thing you would have missed.
    */
   private async refreshTopic(session: ClaudeSession, record: TopicRecord): Promise<void> {
     let changed = false;
@@ -347,22 +345,22 @@ export class RemoteControlService {
       record.mirroredTurns = plan.nextCursor;
       changed = true;
     }
-    if (record.lastActivityAt !== session.updatedAt.getTime()) {
-      record.lastActivityAt = session.updatedAt.getTime();
-      changed = true;
-    }
     if (changed) { await this.topics.save(record); }
   }
 
   /**
-   * Close the topic of any session that has left the active worklist.
+   * Delete the topic of any session that has left the active worklist.
    *
    * This is what keeps the group's topic list equal to the panel's session list. Without it a topic
    * created for a live session outlives it, and the sidebar grows by one dead thread per session
    * that ever ran — the very thing that made the group unusable.
    *
+   * Deleted, not closed. Closing was the first attempt: Telegram keeps a closed topic in the topic
+   * list, so the dead threads stayed exactly where they were, merely locked. The transcript on disk
+   * is unaffected and stays the source of truth, so `/history` can build a fresh topic any time.
+   *
    * Guarded on knowing *something*: a window whose session scan has not loaded yet reports an empty
-   * fleet, and acting on that would close every topic in the group. So an empty view is treated as
+   * fleet, and acting on that would delete every topic in the group. So an empty view is treated as
    * "no information", never as "nothing is active".
    */
   private async pruneInactiveTopics(
@@ -370,38 +368,26 @@ export class RemoteControlService {
   ): Promise<void> {
     if (active.length === 0 && history.length === 0) { return; }
     const activeIds = new Set(active.map(s => s.sessionId));
-    for (const record of topicsToPrune(await this.topics.all(), activeIds, this.now())) {
-      const closed = await this.forum.closeTopic(record.threadId);
-      if (closed.ok) {
-        record.closed = true;
-        await this.topics.save(record);
+    for (const record of topicsToDelete(await this.topics.all(), activeIds, this.now())) {
+      const removed = await this.forum.deleteTopic(record.threadId);
+      // A topic already deleted in the app is the same outcome as one deleted here: the record has
+      // to go, or it is retried on every pass for as long as the group exists.
+      if (removed.ok || removed.topicGone === true) {
+        await this.topics.remove(record.threadId);
         this.log(
-          `remote control: closed topic ${record.threadId} — `
+          `remote control: deleted topic ${record.threadId} — `
           + `${record.sessionId} is no longer active`);
+        continue;
       }
-    }
-  }
-
-  /**
-   * Close topics whose sessions have been quiet, active or not.
-   *
-   * Distinct from `pruneInactiveTopics`, and both are needed. Pruning answers "does the panel still
-   * list this session?"; this answers "has anything happened in it lately?" — a session left open in
-   * a window is active for as long as the window lives, and its topic should still get out of the
-   * way once it goes quiet for `sessionSitter.telegram.idleTopicCloseHours`. It comes back the
-   * moment there is a new turn to post; see `refreshTopic`.
-   *
-   * Closed, never deleted — scrollback survives.
-   */
-  private async closeIdleTopics(): Promise<void> {
-    const all = await this.topics.all();
-    const stale = topicsToClose(all, this.now(), idleCloseMs(this.deps.config));
-    for (const record of stale) {
-      const closed = await this.forum.closeTopic(record.threadId);
-      if (closed.ok) {
-        record.closed = true;
-        await this.topics.save(record);
-        this.log(`remote control: closed idle topic ${record.threadId}`);
+      this.log(`remote control: could not delete topic ${record.threadId}: ${removed.error}`);
+      // Most likely the bot lacks `can_manage_topics`. Fall back to the old behaviour so the thread
+      // is at least locked, and keep the record so the delete is retried once the right is granted.
+      if (!record.closed) {
+        const closed = await this.forum.closeTopic(record.threadId);
+        if (closed.ok) {
+          record.closed = true;
+          await this.topics.save(record);
+        }
       }
     }
   }

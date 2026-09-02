@@ -33,8 +33,6 @@ export interface TopicRecord {
   mirroredTurns: number;
   /** Whether the topic is currently closed on the Telegram side. */
   closed: boolean;
-  /** Last time this session showed activity — drives idle auto-close. */
-  lastActivityAt: number;
   /**
    * When this topic was last opened — created, or reopened.
    *
@@ -61,7 +59,6 @@ export function parseTopic(raw: string): TopicRecord | null {
       name: typeof d.name === 'string' ? d.name : '',
       mirroredTurns: typeof d.mirroredTurns === 'number' ? d.mirroredTurns : 0,
       closed: d.closed === true,
-      lastActivityAt: typeof d.lastActivityAt === 'number' ? d.lastActivityAt : 0,
       // Records written before this field existed fall back to their creation time, which is when
       // they were in fact last opened.
       openedAt: typeof d.openedAt === 'number'
@@ -133,48 +130,45 @@ export class TopicStore {
 }
 
 /**
- * Topics whose session has been quiet longer than `idleMs` and are still open.
- *
- * They are closed rather than deleted: closing keeps the scrollback and search, and the topic is
- * reopened if the session comes back. Deleting would throw away the record of what happened.
- */
-export function topicsToClose(
-  topics: TopicRecord[], now: number, idleMs: number,
-): TopicRecord[] {
-  return topics.filter(t => !t.closed && t.lastActivityAt > 0 && now - t.lastActivityAt > idleMs);
-}
-
-/**
  * How long a freshly opened topic is left alone even though its session is not active.
  *
  * `/history` opens the topic of a session that is, by definition, not in the worklist. Without this
- * window the reader would close it on the very next pass, and the button would look broken. Long
+ * window the reader would delete it on the very next pass, and the button would look broken. Long
  * enough to read a transcript and type a reply; short enough that a topic you abandon still tidies
  * itself away.
  */
 export const MANUAL_OPEN_GRACE_MS = 10 * 60_000;
 
 /**
- * Topics whose session has dropped out of the active worklist.
+ * Topics whose session has dropped out of the active worklist. These are deleted.
  *
  * The Telegram group is meant to show the same set of sessions the panel does, so a session leaving
  * the worklist has to leave the group's topic list too — otherwise every session that ever ran
- * accumulates as a thread and the sidebar becomes unreadable, which is the state this fixes.
+ * accumulates as a thread and the sidebar becomes unreadable.
  *
- * Closed, not deleted, for the same reason as `topicsToClose`: the scrollback and the search stay,
- * and the topic reopens by itself when the session has something new to say.
+ * ## Why deleted, and not closed
+ *
+ * Closing was the first attempt and it does not work: Telegram keeps a closed topic in the group's
+ * topic list, locked but fully visible. The dead threads stayed exactly where they were. Only
+ * deleting removes one from the list.
+ *
+ * So an already-`closed` record is selected here rather than skipped. An installed extension has a
+ * pile of them from the version that only closed topics, and passing over those would leave every
+ * one of those threads in the group for good.
+ *
+ * Nothing is lost that matters: the transcript on disk is the source of truth, and `/history`
+ * builds a fresh topic from it.
  *
  * A topic opened within `MANUAL_OPEN_GRACE_MS` is left alone, because you asked for it.
  *
  * `activeSessionIds` **must** be a set the caller actually knows. Passing an empty set because the
- * session list has not loaded yet would close every topic in the group, so the caller checks that
+ * session list has not loaded yet would delete every topic in the group, so the caller checks that
  * first — see `pruneInactiveTopics`.
  */
-export function topicsToPrune(
+export function topicsToDelete(
   topics: TopicRecord[], activeSessionIds: ReadonlySet<string>, now: number,
   graceMs: number = MANUAL_OPEN_GRACE_MS,
 ): TopicRecord[] {
-  return topics.filter(t => !t.closed
-    && !activeSessionIds.has(t.sessionId)
+  return topics.filter(t => !activeSessionIds.has(t.sessionId)
     && !(t.openedAt > 0 && now - t.openedAt < graceMs));
 }

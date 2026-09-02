@@ -266,14 +266,11 @@ export function activate(context: vscode.ExtensionContext) {
   // is handed its updates instead of polling for them.
   //
   // The adapter spells each setting name out in a direct read rather than forwarding the caller's
-  // string. That is the form `ci/check-settings.mjs` recognises, so these three keys count as read
+  // string. That is the form `ci/check-settings.mjs` recognises, so these two keys count as read
   // and cannot silently drift from their `package.json` declarations.
   const remoteControlSettings: SettingsReader = {
     getBoolean: (key, fallback) => (key === 'telegram.remoteControl'
       ? cfg.get<boolean>('telegram.remoteControl', fallback)
-      : fallback),
-    getNumber: (key, fallback) => (key === 'telegram.idleTopicCloseHours'
-      ? cfg.get<number>('telegram.idleTopicCloseHours', fallback)
       : fallback),
     getStringArray: (key, fallback) => (key === 'telegram.allowedUserIds'
       ? cfg.get<string[]>('telegram.allowedUserIds', fallback)

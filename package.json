@@ -2,7 +2,7 @@
   "name": "session-sitter",
   "displayName": "Session Sitter",
   "description": "Tabbed session switcher for Claude Code, IBM Bob, Codex and VS Code Chat — with traffic-light supervision of the actions your agents pause on",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "publisher": "eranra",
   "icon": "resources/logo.png",
   "galleryBanner": {
@@ -359,12 +359,6 @@
             "type": "string"
           },
           "markdownDescription": "Telegram **user ids** permitted to drive the remote interface. **An empty list authorises nobody**, which is the default.\n\nThis matters more than it does for supervision cards: a group is not a private chat, so anyone who was ever invited could otherwise send text straight into your coding agents.\n\nTo find your id, turn the feature on, send any message in the group, and read the extension's Output log — the id of each rejected sender is logged for you to copy in.\n\nExample:\n\n```json\n[\"123456789\"]\n```"
-        },
-        "sessionSitter.telegram.idleTopicCloseHours": {
-          "type": "number",
-          "default": 24,
-          "minimum": 1,
-          "markdownDescription": "How long a session may be quiet before its topic is **closed**. Closed, never deleted — the scrollback and search stay, and the topic reopens by itself if the session becomes active again.\n\nWithout this, a long-running install accumulates a topic per session until the group's topic list is unusable."
         },
         "sessionSitter.supervisor.knowledgeRepo": {
           "type": "string",

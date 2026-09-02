@@ -126,16 +126,24 @@ disagree about the same fleet:
 - **Codex / VS Code Chat** — no liveness signal exists for these, so recency is the only honest
   proxy: active while updated inside `sessionSitter.probelessActiveWindowMinutes`.
 
-**A session that leaves the active list has its topic closed**, right then — not after a timeout.
-Closed, never deleted: the scrollback and the search stay. A topic is also closed after
-`sessionSitter.telegram.idleTopicCloseHours` of quiet even while its session is still active, so a
-session sitting open in a window for a week does not hold a thread open beside the live ones.
+**A session that leaves the active list has its topic deleted**, right then — not after a timeout.
+So the group's topic list is the active list, and nothing else.
 
-A closed topic **reopens when there is a new turn to post**. Reopening on "the session is still
-active" instead would fight the idle rule — closed every quiet period, reopened on the next pass,
-forever — and new turns are the thing you would actually have missed. A topic you open by hand is
-left alone for ten minutes whichever list its session is in, so tapping a `/history` row never leads
-to a thread that closes under you.
+Deleted, not closed. Closing was the first design and it does not work: Telegram keeps a closed
+topic in the group's topic list, locked but fully visible, so every session that ever ran still
+piled up in the sidebar. Only deleting removes one. Nothing that matters is lost — the transcript on
+disk is the source of truth, and `/history` builds a fresh topic from it whenever you ask.
+
+A topic you open by hand is left alone for ten minutes whichever list its session is in, so tapping
+a `/history` row never leads to a thread that vanishes under you.
+
+A topic you close by hand **reopens when there is a new turn to post**. Reopening on "the session is
+still active" instead would undo that close on the very next pass, and new turns are the thing you
+would actually have missed.
+
+If the bot cannot delete — it needs `can_manage_topics` in the group — the topic is closed instead
+and the delete is retried on later passes, so the reason ends up in the extension's Output log rather
+than being silently dropped.
 
 ### `/history` — bringing a session back
 
@@ -233,9 +241,9 @@ grey language as the panel — see [`STATUS-INDICATORS.md`](STATUS-INDICATORS.md
 | ⚫ | `seen` | Done, and you have read it |
 | ⚪ | `dormant` | Nothing happening, or no signal to tell |
 
-A quiet session's topic is **closed**, never deleted, after
-`sessionSitter.telegram.idleTopicCloseHours` (default 24). Closing keeps the scrollback and the
-search; if the session becomes active again its topic reopens by itself.
+A session's topic is **deleted** as soon as the session leaves the active list. There is no idle
+timer: an active session keeps its topic open for as long as it is active. See
+[What counts as an active session](#what-counts-as-an-active-session).
 
 ---
 

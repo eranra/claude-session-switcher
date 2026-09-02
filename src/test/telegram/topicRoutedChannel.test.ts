@@ -31,7 +31,6 @@ function topic(over: Partial<TopicRecord> = {}): TopicRecord {
     name: 'a topic',
     mirroredTurns: 0,
     closed: false,
-    lastActivityAt: 0,
     openedAt: 0,
     createdAt: 0,
     ...over,

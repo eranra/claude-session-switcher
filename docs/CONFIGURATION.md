@@ -109,7 +109,6 @@ warning is logged — supervision degrades rather than failing silently.
 |---|---|---|
 | `sessionSitter.telegram.remoteControl` | `false` | Turn on the remote interface: each session becomes a topic in a Telegram forum group, and typing in a topic sends into that session. |
 | `sessionSitter.telegram.allowedUserIds` | `[]` | Telegram **user ids** permitted to drive it. **Empty authorises nobody.** Rejected ids are logged so you can copy them in. |
-| `sessionSitter.telegram.idleTopicCloseHours` | `24` | How long a session may be quiet before its topic is closed — closed, never deleted, and reopened if the session revives. |
 
 The bot token and chat id are **reused** from `sessionSitter.supervisor.telegramBotToken` /
 `.telegramChatId` (and their `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` fallbacks), so supervision

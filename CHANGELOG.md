@@ -5,6 +5,42 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.4 — Telegram shows the active sessions, and nothing else
+
+A dead session's topic was **closed**, and closing does not remove it. Telegram keeps a closed topic
+in the group's topic list — locked, greyed, and fully visible — so the cleanup that was supposed to
+keep the group equal to the worklist did nothing a user could see. A real install had 46 topic
+records: 43 correctly marked closed, and all 43 still sitting in the sidebar. The one thing the
+feature was meant to prevent had happened anyway.
+
+Topics are now **deleted** when their session leaves the active list. `ForumApi.deleteTopic` calls
+`deleteForumTopic` and the record is dropped, so the group's topic list is the active list. Nothing
+that matters is lost: the transcript on disk was always the source of truth, and `/history` builds a
+fresh topic from it.
+
+Two details this depended on:
+
+- **Already-closed records are selected too.** `topicsToDelete` no longer skips `closed` topics, the
+  way the old `topicsToPrune` did. Every install carries a pile of them from this version's
+  predecessor, and passing over those would have left the 43 dead threads there for good — the
+  upgrade would have fixed nothing.
+- **A topic already gone is not a failure.** `isTopicGoneError` tells "message thread not found"
+  apart from "not enough rights", so a topic you deleted by hand in the app has its record dropped
+  instead of being retried on every pass forever. A genuine permission failure keeps the record,
+  falls back to closing the topic, and says why in the Output log — the bot needs `can_manage_topics`.
+
+The empty-fleet guard is unchanged and now matters more: a window whose session scan has not loaded
+yet reports nothing active, and acting on that would have deleted every topic in the group.
+
+**`sessionSitter.telegram.idleTopicCloseHours` is removed.** It closed the topic of a session that
+was *still active*, which under the new rule just puts a locked thread back in the list. With delete
+as the only cleanup there is one rule and nothing to tune: a session in the worklist has an open
+topic, and the moment it leaves, the topic goes.
+
+`lastActivityAt` goes from the topic record with it — the idle timer was its only reader, and a field
+still written on every turn for nobody to read is worse than an absent one. Old records on disk parse
+fine; the extra key is ignored.
+
 ### 0.8.3 — Give the panel a clock, and a spinner that survives a repaint
 
 **A bound is not a bound if nothing checks it.** Every age rule the panel applies is measured against

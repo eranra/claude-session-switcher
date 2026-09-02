@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_IDLE_TOPIC_CLOSE_HOURS,
-  idleCloseMs,
   remoteControlConfigFrom,
   startupBlocker,
   type RemoteControlConfig,
@@ -12,7 +10,6 @@ import type { SupervisorConfig } from '../../supervisor/config';
 function settings(values: Record<string, unknown> = {}): SettingsReader {
   return {
     getBoolean: (key, fallback) => (key in values ? values[key] as boolean : fallback),
-    getNumber: (key, fallback) => (key in values ? values[key] as number : fallback),
     getStringArray: (key, fallback) => (key in values ? values[key] as string[] : fallback),
   };
 }
@@ -31,7 +28,6 @@ function config(over: Partial<RemoteControlConfig> = {}): RemoteControlConfig {
     botToken: 'tok',
     chatId: '-100999',
     allowedUserIds: ['42'],
-    idleTopicCloseHours: 24,
     ...over,
   };
 }
@@ -66,11 +62,6 @@ describe('remoteControlConfigFrom', () => {
     expect(cfg.botToken).toBe('tok');
     expect(cfg.chatId).toBe('-1');
   });
-
-  it('defaults the idle close window', () => {
-    expect(remoteControlConfigFrom(settings(), supervisor()).idleTopicCloseHours)
-      .toBe(DEFAULT_IDLE_TOPIC_CLOSE_HOURS);
-  });
 });
 
 describe('startupBlocker', () => {
@@ -101,17 +92,5 @@ describe('startupBlocker', () => {
 
   it('reports the token before the allowlist, so setup is fixed in order', () => {
     expect(startupBlocker(config({ botToken: '', allowedUserIds: [] }))).toContain('bot token');
-  });
-});
-
-describe('idleCloseMs', () => {
-  it('converts hours to milliseconds', () => {
-    expect(idleCloseMs(config({ idleTopicCloseHours: 2 }))).toBe(2 * 3600_000);
-  });
-
-  it('never returns zero or a negative window', () => {
-    // A zero would close every topic on the pass it was created.
-    expect(idleCloseMs(config({ idleTopicCloseHours: 0 }))).toBe(3600_000);
-    expect(idleCloseMs(config({ idleTopicCloseHours: -5 }))).toBe(3600_000);
   });
 });

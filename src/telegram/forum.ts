@@ -30,7 +30,13 @@ export interface ReplyMarkup {
 
 export type ForumOutcome<T> =
   | { ok: true; value: T }
-  | { ok: false; error: string; notAForum?: boolean; retryAfterSeconds?: number };
+  | {
+    ok: false;
+    error: string;
+    notAForum?: boolean;
+    topicGone?: boolean;
+    retryAfterSeconds?: number;
+  };
 
 /** Read `retry_after` out of a Telegram error body, when it is a 429. */
 export function retryAfterOf(resp: Record<string, unknown>): number | undefined {
@@ -55,6 +61,22 @@ export function isNotAForumError(description: string): boolean {
   if (d.includes('forum')) { return true; }
   return d.includes('topic')
     && (d.includes('not enabled') || d.includes('unavailable') || d.includes('disabled'));
+}
+
+/**
+ * True when a Telegram error means "that topic does not exist any more".
+ *
+ * Deleting a topic is how a session leaves the group, and the record is only dropped once Telegram
+ * agrees the topic is gone. A topic someone deleted by hand in the app would otherwise be retried
+ * on every pass forever, so that case has to be told apart from a real failure.
+ *
+ * Kept narrow on purpose. "not enough rights to manage chat topics" also mentions topics but has a
+ * fix — grant the bot `can_manage_topics` — so it must stay a failure that keeps the record.
+ */
+export function isTopicGoneError(description: string): boolean {
+  const d = description.toLowerCase().replace(/[^a-z]+/g, ' ');
+  if (!d.includes('thread') && !d.includes('topic')) { return false; }
+  return d.includes('not found') || d.includes('deleted');
 }
 
 export class ForumApi {
@@ -84,6 +106,7 @@ export class ForumApi {
       ok: false,
       error: `${method}: ${description}`,
       notAForum: isNotAForumError(description),
+      topicGone: isTopicGoneError(description),
       retryAfterSeconds,
     };
   }
@@ -109,6 +132,18 @@ export class ForumApi {
 
   async reopenTopic(threadId: number): Promise<ForumOutcome<true>> {
     return this.call<true>('reopenForumTopic', { message_thread_id: threadId });
+  }
+
+  /**
+   * Remove a topic and everything posted in it.
+   *
+   * This is how a session leaves the group. Closing was tried first and is not enough: Telegram
+   * keeps a closed topic in the group's topic list, so the sidebar still grew by one dead thread
+   * per session that ever ran. Deleting is permanent — the transcript on disk stays the source of
+   * truth, and `/history` builds a fresh topic from it.
+   */
+  async deleteTopic(threadId: number): Promise<ForumOutcome<true>> {
+    return this.call<true>('deleteForumTopic', { message_thread_id: threadId });
   }
 
   /**

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  MANUAL_OPEN_GRACE_MS, TopicStore, parseTopic, topicsToClose, topicsToPrune, type TopicRecord,
+  MANUAL_OPEN_GRACE_MS, TopicStore, parseTopic, topicsToDelete, type TopicRecord,
 } from '../../telegram/topics';
 import { topicsDir } from '../../telegram/bus';
 
@@ -25,7 +25,6 @@ function record(over: Partial<TopicRecord> = {}): TopicRecord {
     name: '🟠 app / a title · claude',
     mirroredTurns: 3,
     closed: false,
-    lastActivityAt: 1000,
     openedAt: 500,
     createdAt: 500,
     ...over,
@@ -125,74 +124,53 @@ describe('TopicStore', () => {
   });
 });
 
-describe('topicsToClose', () => {
-  const idleMs = 24 * 3600_000;
-
-  it('closes a topic whose session has been quiet too long', () => {
-    const stale = record({ lastActivityAt: 1000 });
-    expect(topicsToClose([stale], 1000 + idleMs + 1, idleMs)).toEqual([stale]);
-  });
-
-  it('leaves a recently active topic open', () => {
-    expect(topicsToClose([record({ lastActivityAt: 1000 })], 1000 + 60_000, idleMs)).toEqual([]);
-  });
-
-  it('never closes an already-closed topic twice', () => {
-    const closed = record({ lastActivityAt: 1000, closed: true });
-    expect(topicsToClose([closed], 1000 + idleMs + 1, idleMs)).toEqual([]);
-  });
-
-  it('skips a topic with no recorded activity', () => {
-    // Activity of 0 means "not known yet", not "quiet since the epoch".
-    expect(topicsToClose([record({ lastActivityAt: 0 })], Date.now(), idleMs)).toEqual([]);
-  });
-});
-
-describe('topicsToPrune', () => {
+describe('topicsToDelete', () => {
   // Well past MANUAL_OPEN_GRACE_MS, so the grace window is out of the way unless a test wants it.
   const LATER = 500 + MANUAL_OPEN_GRACE_MS * 10;
 
-  it('closes the topic of a session that has left the active list', () => {
-    // The group's topic list has to equal the panel's session list, or every session that ever ran
-    // accumulates as a dead thread in the sidebar.
+  it('deletes the topic of a session that has left the active list', () => {
+    // The group's topic list has to equal the panel's session list. Closing was not enough:
+    // Telegram keeps a closed topic in the list, so every session that ever ran stayed visible.
     const gone = record({ threadId: 7, sessionId: 'gone' });
-    expect(topicsToPrune([gone], new Set(['still-here']), LATER)).toEqual([gone]);
+    expect(topicsToDelete([gone], new Set(['still-here']), LATER)).toEqual([gone]);
   });
 
   it('leaves the topic of an active session alone', () => {
     const live = record({ threadId: 7, sessionId: 'live' });
-    expect(topicsToPrune([live], new Set(['live']), LATER)).toEqual([]);
+    expect(topicsToDelete([live], new Set(['live']), LATER)).toEqual([]);
   });
 
-  it('never closes an already-closed topic twice', () => {
+  it('deletes an already-closed topic too', () => {
+    // The version that only closed topics left a pile of closed records behind. Skipping them here
+    // would leave every one of those threads in the group forever.
     const closed = record({ sessionId: 'gone', closed: true });
-    expect(topicsToPrune([closed], new Set<string>(), LATER)).toEqual([]);
+    expect(topicsToDelete([closed], new Set<string>(), LATER)).toEqual([closed]);
   });
 
   it('spares a topic you just opened by hand', () => {
-    // `/history` opens the topic of a session that is by definition not active. Closing it on the
+    // `/history` opens the topic of a session that is by definition not active. Deleting it on the
     // next pass would make the button look broken.
     const justOpened = record({ sessionId: 'gone', openedAt: 1_000 });
-    expect(topicsToPrune([justOpened], new Set<string>(), 1_000 + 60_000)).toEqual([]);
+    expect(topicsToDelete([justOpened], new Set<string>(), 1_000 + 60_000)).toEqual([]);
   });
 
-  it('closes it once the grace window has passed', () => {
+  it('deletes it once the grace window has passed', () => {
     const opened = record({ sessionId: 'gone', openedAt: 1_000 });
-    expect(topicsToPrune([opened], new Set<string>(), 1_000 + MANUAL_OPEN_GRACE_MS + 1))
+    expect(topicsToDelete([opened], new Set<string>(), 1_000 + MANUAL_OPEN_GRACE_MS + 1))
       .toEqual([opened]);
   });
 
   it('does not treat an unknown open time as freshly opened', () => {
     // 0 means "not recorded", so it must not buy an old topic an indefinite reprieve.
     const legacy = record({ sessionId: 'gone', openedAt: 0 });
-    expect(topicsToPrune([legacy], new Set<string>(), 60_000)).toEqual([legacy]);
+    expect(topicsToDelete([legacy], new Set<string>(), 60_000)).toEqual([legacy]);
   });
 
-  it('would close everything for an empty active set — which is why the caller guards it', () => {
+  it('would delete everything for an empty active set — which is why the caller guards it', () => {
     // Documented deliberately: this function cannot tell "nothing is active" from "the session
     // list has not loaded yet". `pruneInactiveTopics` makes that distinction before calling.
     const a = record({ threadId: 1, sessionId: 'a' });
     const b = record({ threadId: 2, sessionId: 'b' });
-    expect(topicsToPrune([a, b], new Set<string>(), LATER)).toEqual([a, b]);
+    expect(topicsToDelete([a, b], new Set<string>(), LATER)).toEqual([a, b]);
   });
 });

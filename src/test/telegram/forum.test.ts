@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { ForumApi, isNotAForumError, retryAfterOf } from '../../telegram/forum';
+import {
+  ForumApi, isNotAForumError, isTopicGoneError, retryAfterOf,
+} from '../../telegram/forum';
 import type { ApiFn } from '../../supervisor/telegram';
 
 /** Records every call and replies from a scripted queue. No network anywhere. */
@@ -36,6 +38,23 @@ describe('isNotAForumError', () => {
   it('does not claim an unrelated error is a forum problem', () => {
     expect(isNotAForumError('Bad Request: message is too long')).toBe(false);
     expect(isNotAForumError('Forbidden: bot was blocked by the user')).toBe(false);
+  });
+});
+
+describe('isTopicGoneError', () => {
+  it('recognises the wordings that mean the topic is already gone', () => {
+    // A topic deleted by hand in the app must not be retried forever. Matched on text for the
+    // same reason as `isNotAForumError`: Telegram sends a plain 400 with prose.
+    expect(isTopicGoneError('Bad Request: message thread not found')).toBe(true);
+    expect(isTopicGoneError('Bad Request: topic not found')).toBe(true);
+    expect(isTopicGoneError('Bad Request: TOPIC_DELETED')).toBe(true);
+  });
+
+  it('does not mistake a missing permission for a missing topic', () => {
+    // This one has a fix — grant the bot can_manage_topics — so it must stay a real failure and
+    // keep the record, rather than being swallowed as "already tidy".
+    expect(isTopicGoneError('Bad Request: not enough rights to manage chat topics')).toBe(false);
+    expect(isTopicGoneError('Bad Request: message is too long')).toBe(false);
   });
 });
 
@@ -145,5 +164,30 @@ describe('ForumApi', () => {
       7, 'a.md', 'body', 'caption', async () => ({ ok: false, description: 'too big' }));
     expect(result.ok).toBe(false);
     if (!result.ok) { expect(result.error).toContain('too big'); }
+  });
+  it('deletes a topic through deleteForumTopic', async () => {
+    const { api, calls } = fakeApi({ deleteForumTopic: { ok: true, result: true } });
+    expect((await new ForumApi(api, '-100999').deleteTopic(7)).ok).toBe(true);
+    expect(calls[0].method).toBe('deleteForumTopic');
+    expect(calls[0].payload).toEqual({ chat_id: '-100999', message_thread_id: 7 });
+  });
+
+  it('flags a topic that is already gone so the caller stops retrying it', async () => {
+    const { api } = fakeApi({
+      deleteForumTopic: { ok: false, description: 'Bad Request: message thread not found' },
+    });
+    const result = await new ForumApi(api, '-1').deleteTopic(7);
+    expect(result.ok).toBe(false);
+    if (!result.ok) { expect(result.topicGone).toBe(true); }
+  });
+
+  it('does not flag a permission failure as a gone topic', async () => {
+    // A bot without can_manage_topics must keep its record and fall back, not lose the topic.
+    const { api } = fakeApi({
+      deleteForumTopic: { ok: false, description: 'Bad Request: not enough rights' },
+    });
+    const result = await new ForumApi(api, '-1').deleteTopic(7);
+    expect(result.ok).toBe(false);
+    if (!result.ok) { expect(result.topicGone).toBeFalsy(); }
   });
 });
