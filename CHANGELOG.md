@@ -5,6 +5,35 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.8 — An open tab is not work in progress
+
+A session that had finished hours earlier sat at the top of the worklist, on a machine whose IDE
+window had been closed. The rule was doing what it said: a window reporting a tab open settled the
+question outright, at any age.
+
+That report is honest, and it answers the wrong question. It says the tab exists, not that anything
+is happening in it. On a remote IDE the two come apart badly. The process that publishes the window
+entry is the **server-side** extension host, and closing the client window does not kill it — the
+server keeps it warm for a reconnect that may never come. So it stays alive by `process.kill`, keeps
+refreshing its entry every 60 seconds, and keeps naming the tabs that were open when you
+disconnected. Every liveness gate the registry and the peer probe apply passes truthfully. Observed:
+an extension host 2 h 38 m old, its entry rewritten 6 seconds before it was read, no client attached
+to the server at all.
+
+So a probe report and recency now back each other up instead of either one deciding alone. A
+`working` session counts if a window reports it open **or** its transcript is recent — that half is
+unchanged, and it is what keeps a session you are sitting in from vanishing during a probe hiccup.
+Anything past `working` needs both. Blocked on you is still exempt from every bound there is: that
+row is stuck, not stale, and hiding it is the one failure that costs you something.
+
+The bound is the two hours already in `STALE_FALLBACK_WINDOW_MS`, not a second knob. Both halves are
+covering for the same weakness from opposite sides, and one number is easier to reason about than
+two that must be kept in a sensible relation to each other.
+
+One cost, stated plainly: a finished session in a tab you have open but have not touched for two
+hours now moves to History. That is the trade. The panel and Telegram both read this one rule, so
+they still agree about the fleet.
+
 ### 0.8.7 — The working ring turns again
 
 The `working` spinner was standing still on any machine with Windows animation effects switched off,

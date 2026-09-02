@@ -42,10 +42,38 @@ function inputs(over: Partial<Parameters<typeof isActiveSession>[1]> = {}) {
   };
 }
 
-describe('isActiveSession — a probe report is authoritative', () => {
-  it('counts a Claude session a window reports open, however old and however quiet', () => {
-    const old = session({ updatedAt: new Date(NOW - 30 * 86400_000), status: 'seen' });
+describe('isActiveSession — a probe report is authoritative while work is moving', () => {
+  it('counts a working session a window reports open, however old', () => {
+    // Someone is in this session right now. The transcript's own age says nothing.
+    const old = session({ updatedAt: new Date(NOW - 30 * 86400_000), status: 'working' });
     expect(isActiveSession(old, inputs({ claudeOpenIds: new Set(['sid']) }))).toBe(true);
+  });
+
+  it('drops a finished session a window reports open once it has gone quiet', () => {
+    // The case this bound exists for: a remote IDE's extension host outlives the client window it
+    // belonged to, so it keeps publishing a registry entry — alive by `process.kill`, with nobody
+    // sitting in front of it. An open tab is not work in progress.
+    const abandoned = session({
+      status: 'finished',
+      updatedAt: new Date(NOW - STALE_FALLBACK_WINDOW_MS - 1_000),
+    });
+    expect(isActiveSession(abandoned, inputs({ claudeOpenIds: new Set(['sid']) }))).toBe(false);
+  });
+
+  it('keeps a finished session a window reports open while it is still recent', () => {
+    // You have just read the result and may still act on it. Only age moves it out.
+    const fresh = session({ status: 'finished', updatedAt: new Date(NOW - 60_000) });
+    expect(isActiveSession(fresh, inputs({ claudeOpenIds: new Set(['sid']) }))).toBe(true);
+  });
+
+  it('counts an open session sitting exactly on the bound', () => {
+    // The comparison is inclusive, so the two branches meet at the same instant rather than
+    // leaving a one-millisecond hole where a session is in neither list's reasoning.
+    const edge = session({
+      status: 'seen',
+      updatedAt: new Date(NOW - STALE_FALLBACK_WINDOW_MS),
+    });
+    expect(isActiveSession(edge, inputs({ claudeOpenIds: new Set(['sid']) }))).toBe(true);
   });
 
   it('counts a Bob task a window reports open', () => {
