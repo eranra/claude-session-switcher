@@ -2,7 +2,7 @@
   "name": "session-sitter",
   "displayName": "Session Sitter",
   "description": "Tabbed session switcher for Claude Code, IBM Bob, Codex and VS Code Chat — with traffic-light supervision of the actions your agents pause on",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "publisher": "eranra",
   "icon": "resources/logo.png",
   "galleryBanner": {
@@ -184,6 +184,12 @@
             "default": 120,
             "minimum": 0,
             "markdownDescription": "How recently a **Codex** or **VS Code Chat** session must have been updated to count as active in the Sessions list. Those sources expose no live-process signal, so recency is the only available proxy; Claude and Bob sessions are judged by what their extension hosts actually report as open. Set to `0` to keep them in History always."
+          },
+          "sessionSitter.windowAttentionMinutes": {
+            "type": "number",
+            "default": 0,
+            "minimum": 0,
+            "markdownDescription": "How long after someone last interacted with an IDE window that window's report of its open sessions still counts, in minutes. `0` (the default) turns this off, and every live window's report counts however long ago it was last touched.\n\nThis exists for remote IDEs. The process that publishes a window's open sessions is the **server-side** extension host, and closing the client window does not stop it: the server keeps it alive for a reconnect, so it goes on reporting the sessions that were open when you disconnected. Setting this makes those reports expire.\n\nRaise it rather than lower it if a session you are working in moves to History too eagerly. Windows running a build of this extension too old to publish the signal are always treated as attended."
           },
           "sessionSitter.remotePeers": {
             "type": "string",

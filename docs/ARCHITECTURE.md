@@ -256,6 +256,16 @@ trusted. `SessionSitterViewProvider.sessionPartition()` gathers the live signals
 probes, the window registry, the probeless window setting), applies the rule, and hands the same two
 lists to both surfaces.
 
+One of those signals needs a word of warning, because it reads as stronger than it is. A window
+entry proves its **publisher** is running, which on a remote IDE is not the same as a person being
+there: the extension host lives on the server, survives the client window closing, and goes on
+republishing the tabs that were open when you disconnected. Two things bound that. `sessionActivity`
+makes an open-tab report expire — past `STALE_FALLBACK_WINDOW_MS` it only still counts for a
+`working` session or one blocked on you. And each entry carries `lastActiveAt`, from
+`vscode.window.state`, which stops advancing when nobody is at the window;
+`sessionSitter.windowAttentionMinutes` decides how long a report survives that silence, and ships at
+`0`, meaning off.
+
 ### `SessionSitterViewProvider`
 
 Implements `WebviewViewProvider`. Wires `SessionManager` events and the VS Code tab API to the webview.

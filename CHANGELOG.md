@@ -5,6 +5,32 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.9 — A window can be alive with nobody in it
+
+0.8.8 stopped a closed window's finished sessions from sitting in the worklist forever, by making a
+probe report expire. This adds the sharper signal it was standing in for: when someone was last
+actually at the window.
+
+Every liveness test the registry has answers "is the publisher still running". On a remote IDE that
+is the wrong question. The publisher is the **server-side** extension host, and closing the client
+window does not stop it — the server keeps it warm for a reconnect that may never come, so it goes on
+naming the tabs that were open when you disconnected. `process.kill` says yes, truthfully, to a
+window nobody can see.
+
+So a window entry now carries `lastActiveAt` alongside `updatedAt`. `updatedAt` says the publisher
+is running; `lastActiveAt` says a person was here, taken from `vscode.window.state` and stamped only
+while the window reports itself interacted with. `sessionSitter.windowAttentionMinutes` then bounds
+how long that report keeps counting, and a window past the bound stops vouching for its tabs. The
+sessions fall back to the same rules that already cover a window with no probe at all — so a
+`working` session still survives on recency, and one blocked on your approval still never ages out.
+
+**It ships off, at `0`.** The premise underneath it is a claim about the extension host, not about
+this code: whether a host that has lost its client really does stop reporting itself active is not
+something the panel can check from the inside. Shipping the signal inert makes it measurable — the
+field is published and readable on a peer — without hiding a session on an unverified guess. Two
+things fail open for the same reason: a zero window disables the rule outright, and an entry carrying
+no stamp at all counts as attended, so a peer running an older build behaves exactly as it does today.
+
 ### 0.8.8 — An open tab is not work in progress
 
 A session that had finished hours earlier sat at the top of the worklist, on a machine whose IDE

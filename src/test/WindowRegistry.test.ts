@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  detectIdeCli, discoverOwnIpcSocket, type ProcFs,
+  detectIdeCli, discoverOwnIpcSocket, isAttendedWindow, type ProcFs,
   writeWindowEntry, readLiveWindows, removeWindowEntry, windowsDir, type WindowEntry,
 } from '../WindowRegistry';
 
@@ -147,5 +147,38 @@ describe('window registry files', () => {
 
     await readLiveWindows({ homedir: home, isAlive: () => true, now: Date.now() });
     expect(fs.existsSync(bogus)).toBe(false);
+  });
+});
+
+describe('isAttendedWindow', () => {
+  const NOW = 10_000_000;
+  const win = (over: Partial<WindowEntry> = {}): WindowEntry => ({
+    pid: 42, workspaceFolders: ['/ws'], ideCli: 'bobide', ipcSocket: '/s.sock', updatedAt: NOW, ...over,
+  });
+
+  it('is off entirely at a zero window', () => {
+    // The default. Nothing about a window's attention changes the session list until it is set.
+    const long_gone = win({ lastActiveAt: NOW - 30 * 86400_000 });
+    expect(isAttendedWindow(long_gone, 0, NOW)).toBe(true);
+  });
+
+  it('counts a window interacted with inside the window', () => {
+    expect(isAttendedWindow(win({ lastActiveAt: NOW - 60_000 }), 30 * 60_000, NOW)).toBe(true);
+  });
+
+  it('stops counting a window nobody has touched since before the window', () => {
+    // The disconnected remote host: its extension host still runs and still republishes, but no
+    // client has been attached to it since the stamp.
+    expect(isAttendedWindow(win({ lastActiveAt: NOW - 31 * 60_000 }), 30 * 60_000, NOW)).toBe(false);
+  });
+
+  it('counts a window sitting exactly on the bound', () => {
+    expect(isAttendedWindow(win({ lastActiveAt: NOW - 30 * 60_000 }), 30 * 60_000, NOW)).toBe(true);
+  });
+
+  it('counts an entry that carries no stamp at all', () => {
+    // An older build on a peer, or a host whose WindowState has no `active`. Absence of the signal
+    // must never be read as absence of a person — that would hide sessions the panel used to show.
+    expect(isAttendedWindow(win(), 30 * 60_000, NOW)).toBe(true);
   });
 });

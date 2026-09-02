@@ -14,6 +14,17 @@ export interface WindowEntry {
   openBobTaskIds?: string[];
   // Claude session ids open in this window (from Claude's live manager).
   openClaudeSessionIds?: string[];
+  /**
+   * When someone last interacted with this window, from `vscode.window.state`.
+   *
+   * Separate from `updatedAt`, which only says the publisher is still running. On a remote IDE
+   * those are different facts: the extension host lives on the server and survives the client
+   * window closing, so it keeps republishing entries nobody is looking at.
+   *
+   * Optional, and its absence means "assume attended" — an older build on a peer, or a host whose
+   * `WindowState` predates `active`, must not have its sessions quietly hidden.
+   */
+  lastActiveAt?: number;
 }
 
 const HELPER_NAMES = new Set(['helpers']);
@@ -86,6 +97,26 @@ export function discoverOwnIpcSocket(
 }
 
 const STALE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Has anyone been at this window recently enough for its open-tab report to mean anything?
+ *
+ * `readLiveWindows` and the peer probe both answer "is the publisher alive", which is not the same
+ * question and comes apart on a remote IDE: closing the client window leaves the server-side
+ * extension host running, so it stays alive by `process.kill` and keeps refreshing an entry naming
+ * the tabs that were open when you disconnected.
+ *
+ * Fails open in both directions that matter. A zero window turns the rule off, and an entry with no
+ * stamp counts as attended — because reading a missing signal as "nobody is here" would hide
+ * sessions from the worklist for a reason the user cannot see.
+ */
+export function isAttendedWindow(
+  entry: WindowEntry, attentionWindowMs: number, now: number,
+): boolean {
+  if (attentionWindowMs <= 0) { return true; }
+  if (typeof entry.lastActiveAt !== 'number') { return true; }
+  return entry.lastActiveAt >= now - attentionWindowMs;
+}
 
 export function windowsDir(homedir: string = os.homedir()): string {
   return path.join(homedir, '.claude', 'session-sitter', 'windows');

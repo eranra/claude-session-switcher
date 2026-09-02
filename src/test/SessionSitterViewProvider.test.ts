@@ -54,6 +54,7 @@ vi.mock('vscode', () => {
     },
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
     window: {
+      state: { active: true, focused: true },
       tabGroups: { all: [], onDidChangeTabs: vi.fn(() => ({ dispose: vi.fn() })) },
       showWarningMessage: mockShowWarningMessage,
       onDidChangeWindowState: vi.fn(() => ({ dispose: vi.fn() })),
@@ -95,13 +96,16 @@ vi.mock('../SessionManager', async (importOriginal) => {
 });
 
 // ── WindowRegistry stub ──────────────────────────────────────────────────────
-const { mockReadLiveWindows } = vi.hoisted(() => ({ mockReadLiveWindows: vi.fn().mockResolvedValue([]) }));
+const { mockReadLiveWindows, mockWriteWindowEntry } = vi.hoisted(() => ({
+  mockReadLiveWindows: vi.fn().mockResolvedValue([]),
+  mockWriteWindowEntry: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('../WindowRegistry', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../WindowRegistry')>();
   return {
     ...actual,
     readLiveWindows: mockReadLiveWindows,
-    writeWindowEntry: vi.fn().mockResolvedValue(undefined),
+    writeWindowEntry: mockWriteWindowEntry,
     removeWindowEntry: vi.fn().mockResolvedValue(undefined),
     discoverOwnIpcSocket: vi.fn().mockReturnValue('/run/self.sock'),
     detectIdeCli: vi.fn().mockReturnValue('bobide'),
@@ -1451,5 +1455,103 @@ describe("the panel's own clock", () => {
     const afterDispose = postMessage.mock.calls.length;
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     expect(postMessage.mock.calls.length).toBe(afterDispose);
+  });
+});
+
+// ── Window attention ─────────────────────────────────────────────────────────
+//
+// `readLiveWindows` proves a publisher is running, which on a remote IDE is not the same as a
+// person being there: closing the client window leaves the server-side extension host alive, still
+// republishing the tabs that were open when you disconnected. These tests pin the second signal.
+
+describe('window attention', () => {
+  function published(): import('../WindowRegistry').WindowEntry {
+    const calls = mockWriteWindowEntry.mock.calls;
+    return calls[calls.length - 1][0] as import('../WindowRegistry').WindowEntry;
+  }
+
+  function session(sessionId: string, minutesAgo: number): import('../SessionManager').ClaudeSession {
+    return {
+      sessionId, projectPath: '/p', projectName: 'p', title: `t-${sessionId}`,
+      updatedAt: new Date(Date.now() - minutesAgo * 60_000), status: 'finished', source: 'claude',
+    };
+  }
+
+  function windowEntry(lastActiveMinutesAgo: number): import('../WindowRegistry').WindowEntry {
+    return {
+      pid: 7, workspaceFolders: [], ideCli: 'bobide', ipcSocket: '', updatedAt: Date.now(),
+      lastActiveAt: Date.now() - lastActiveMinutesAgo * 60_000,
+      openClaudeSessionIds: ['c-abandoned'],
+    };
+  }
+
+  /** Read the sessions the panel would render as the worklist. */
+  async function worklist(
+    provider: import('../SessionSitterViewProvider').SessionSitterViewProvider,
+  ): Promise<string[]> {
+    const partition = await provider.sessionPartition();
+    return partition.active.map(s => s.sessionId);
+  }
+
+  /** Publish once, on demand — the constructor's own publish is fire-and-forget. */
+  async function publish(
+    provider: import('../SessionSitterViewProvider').SessionSitterViewProvider,
+  ): Promise<void> {
+    await (provider as unknown as { _publishWindowEntry(): Promise<void> })._publishWindowEntry();
+  }
+
+  beforeEach(() => {
+    mockWriteWindowEntry.mockClear();
+    mockReadLiveWindows.mockResolvedValue([]);
+    setClaudeOpenState({});
+    // A previous test may have left the window quiet; every test states its own starting point.
+    (vscode.window.state as unknown as { active: boolean }).active = true;
+  });
+
+  it('publishes when this window was last interacted with', async () => {
+    // Without a stamp there is nothing for a reader to bound, and a disconnected host looks
+    // exactly like one you are typing in.
+    const before = Date.now();
+    await publish(makeProvider());
+    expect(published().lastActiveAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it('stops advancing the stamp once the window goes quiet', async () => {
+    const provider = makeProvider();
+    await publish(provider);
+    const first = published().lastActiveAt;
+
+    (vscode.window.state as unknown as { active: boolean }).active = false;
+    await publish(provider);
+
+    // Asserted as a number as well, so an implementation that publishes no stamp at all cannot
+    // satisfy this by leaving both sides undefined.
+    expect(first).toEqual(expect.any(Number));
+    expect(published().lastActiveAt).toBe(first);
+  });
+
+  it('drops a session that only an unattended window reports open', async () => {
+    // The bug: a peer whose IDE window was closed hours ago still names its old tabs.
+    mockReadLiveWindows.mockResolvedValue([windowEntry(40)]);
+    mockGetConfiguration.mockImplementation(() => ({ get: (k?: string, d?: unknown) =>
+      k === 'windowAttentionMinutes' ? 30 : d }));
+
+    expect(await worklist(makeProvider([session('c-abandoned', 5)]))).toEqual([]);
+  });
+
+  it('keeps a session an attended window reports open', async () => {
+    mockReadLiveWindows.mockResolvedValue([windowEntry(5)]);
+    mockGetConfiguration.mockImplementation(() => ({ get: (k?: string, d?: unknown) =>
+      k === 'windowAttentionMinutes' ? 30 : d }));
+
+    expect(await worklist(makeProvider([session('c-abandoned', 5)]))).toEqual(['c-abandoned']);
+  });
+
+  it('changes nothing at the default of zero', async () => {
+    // Off unless asked for. The premise this rests on — that a disconnected extension host really
+    // does stop reporting itself active — is not something the panel can verify from here.
+    mockReadLiveWindows.mockResolvedValue([windowEntry(40)]);
+
+    expect(await worklist(makeProvider([session('c-abandoned', 5)]))).toEqual(['c-abandoned']);
   });
 });

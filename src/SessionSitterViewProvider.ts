@@ -5,7 +5,7 @@ import * as os from 'os';
 import { execFile } from 'child_process';
 import { randomBytes } from 'crypto';
 import { SessionManager, ClaudeSession, MessageExchange } from './SessionManager';
-import { readLiveWindows, writeWindowEntry, removeWindowEntry, discoverOwnIpcSocket, detectIdeCli, type WindowEntry } from './WindowRegistry';
+import { readLiveWindows, writeWindowEntry, removeWindowEntry, discoverOwnIpcSocket, detectIdeCli, isAttendedWindow, type WindowEntry } from './WindowRegistry';
 import { getOpenBobTaskIds } from './agents/BobInspector';
 import { getOpenClaudeSessionIds } from './agents/ClaudeInspector';
 import { BUILD_TIME, BUILD_VERSION } from './buildInfo';
@@ -95,6 +95,13 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
   private _view?: vscode.WebviewView;
   private _viewDisposables: vscode.Disposable[] = [];
   private _historyOpen = false;
+  /**
+   * When this window was last interacted with, as published in its registry entry.
+   *
+   * Held here rather than recomputed per publish because the publish timer keeps firing while
+   * nobody is there — the point of the stamp is that it stops advancing.
+   */
+  private _lastActiveAt = Date.now();
   private _focusWatcher: vscode.Disposable | undefined;
   private _registryTimer: ReturnType<typeof setInterval> | undefined;
   private _activity: SupervisionActivity | undefined;
@@ -172,6 +179,11 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
   // Publish this window's identity + IPC socket so other windows can focus it.
   private async _publishWindowEntry(): Promise<void> {
     const folders = (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath);
+    // `active` is 1.85; the manifest allows older hosts, and there it reads `undefined`. Treated as
+    // "someone is here", which leaves the stamp always fresh and the rule that reads it inert —
+    // the only safe direction, since the alternative hides sessions on hosts that cannot answer.
+    const active = (vscode.window.state as { active?: boolean }).active;
+    if (active !== false) { this._lastActiveAt = Date.now(); }
     await writeWindowEntry({
       pid: process.pid,
       workspaceFolders: folders,
@@ -180,6 +192,7 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
       openBobTaskIds: await getOpenBobTaskIds(this._log),
       openClaudeSessionIds: (await getOpenClaudeSessionIds(this._log)).open,
       updatedAt: Date.now(),
+      lastActiveAt: this._lastActiveAt,
     });
   }
 
@@ -592,6 +605,20 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
       .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
   }
 
+  /**
+   * How long after its last interaction a window's open-tab report still counts. `0` disables it.
+   *
+   * Off by default. The signal it rests on cannot be checked from here: whether a remote extension
+   * host that has lost its client really stops reporting itself active is a claim about the host,
+   * not about this code, and getting it wrong hides sessions for a reason a user cannot see.
+   */
+  private _windowAttentionMs(): number {
+    const minutes = vscode.workspace.getConfiguration('sessionSitter')
+      .get<number>('windowAttentionMinutes', 0);
+    const safe = typeof minutes === 'number' && minutes >= 0 ? minutes : 0;
+    return safe * 60_000;
+  }
+
   /** How long a probeless session (Codex / VS Code Chat) counts as active. */
   private _probelessWindowMs(): number {
     const minutes = vscode.workspace.getConfiguration('sessionSitter')
@@ -633,10 +660,15 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
     // tests liveness with `process.kill`, which cannot describe a pid on another host. Peer
     // windows arrive already filtered for liveness by the probe, on the machine that owns the pid.
     // Optional call: peer support is additive, and a session manager without it is still valid.
+    const nowMs = Date.now();
+    const attentionMs = this._windowAttentionMs();
     const windows = [
       ...await readLiveWindows(),
       ...(this._sessionManager.getPeerWindows?.() ?? []),
-    ];
+    // A window nobody has been at for a while no longer vouches for its tabs. `localClaude` and
+    // `localBobIds` are exempt below: they are read live from THIS window's hosts, and this window
+    // is by definition the one the user is in.
+    ].filter(w => isAttendedWindow(w, attentionMs, nowMs));
     const all = this._sortedByRecency().map(s => this._withDisplayStatus(s));
     const { active, history } = partitionByActivity(all, {
       claudeOpenIds: new Set<string>([
@@ -648,7 +680,7 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
         ...windows.flatMap(w => w.openBobTaskIds ?? []),
       ]),
       probelessWindowMs: this._probelessWindowMs(),
-      nowMs: Date.now(),
+      nowMs,
     });
     return { active, history, current: localClaude.active };
   }
