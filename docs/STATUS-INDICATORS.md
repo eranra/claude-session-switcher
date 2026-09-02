@@ -85,7 +85,9 @@ rather than treated as an answer.
 | tool result | ≥ 45s | `dormant` (turn abandoned there) |
 | unfinished tool call | < 45s | `working` |
 | unfinished tool call | ≥ 45s | **`approval`** |
-| unfinished call to `AskUserQuestion` | any | **`question`** |
+| unfinished tool call | ≥ 24h | `dormant` (nothing is left to answer it) |
+| unfinished call to `AskUserQuestion` | < 24h | **`question`** |
+| unfinished call to `AskUserQuestion` | ≥ 24h | `dormant` |
 | user prompt | < 2min | `working` (about to start) |
 | user prompt | ≥ 2min | `dormant` (nobody ever answered) |
 | assistant text | < 30s | `working` (still streaming) |
@@ -105,8 +107,22 @@ This is the bug this design was built to fix. Before it, an unanswered tool call
 "regardless of recency", so a session waiting for your approval spun busily forever and read as
 *leave me alone*.
 
-A question is exempt from the timer: an unanswered `AskUserQuestion` is a question after two
+A question skips the 45-second timer: an unanswered `AskUserQuestion` is a question after two
 seconds and after three hours, because nothing else could have happened in the meantime.
+
+### Why both blocked states give up after a day
+
+`approval` and `question` are the two states the worklist filter never ages out — deliberately, since
+a session waiting on you is stuck rather than stale. That makes the *upper* bound load-bearing: a
+session killed mid-tool-call would otherwise be `approval` forever, sitting at the top of the
+worklist for weeks on the strength of a file that will never be written again, with no process left
+to answer it and no way for you to clear it. This was real — a 47-hour-old `approval` no window held.
+
+After a day, silence is evidence of abandonment rather than of patience. Nothing is lost by drawing
+the line there: a session whose window is genuinely still open stays in the worklist through the live
+probe, which never consults the status at all, and Bob's live pending approvals still upgrade the row
+regardless of age. The bound only bites when *no* live signal agrees with the file — which is exactly
+the case where the file is the thing that is wrong.
 
 ### The known gap for Claude
 
@@ -118,15 +134,17 @@ session's prompt on another row, which is worse than inferring.
 So for Claude, `approval` and `question` come from the transcript heuristic above, and carry its 45
 second latency. For Bob they are read live.
 
-### Three deliberately bounded timers
+### Four deliberately bounded timers
 
 Each window is "quiet for longer than this means something different happened", and they are
-separate because the three cases tolerate very different silences:
+separate because the cases tolerate very different silences:
 
 - **30s** (`STREAMING_WINDOW_MS`) — token streaming writes far more often than this.
 - **45s** (`TOOL_STALL_MS`) — long enough that a slow-but-live tool is not mistaken for a prompt.
 - **2min** (`PROMPT_WINDOW_MS`) — the agent may be thinking, queued, or reconnecting. Bounded so a
   transcript ending on a prompt nobody ever answered goes quiet instead of pulsing for weeks.
+- **24h** (`ABANDONED_TOOL_CALL_MS`) — past this, an unanswered tool call is a dead session rather
+  than a patient one. See above; this is the bound that keeps a zombie out of the worklist.
 
 ---
 

@@ -86,7 +86,20 @@ export class PendingWatcher {
       const changed = next.size !== this._pending.size
         || [...next].some(([id, state]) => this._pending.get(id) !== state);
       this._pending = next;
-      if (changed) { this.onChange(); }
+      if (changed) {
+        // Logged on every change, including back to empty.
+        //
+        // This map is the only input that can make a session `approval` or `question`, and those
+        // are the two states the worklist never ages out — so one stale entry pins a row at the top
+        // of the list indefinitely. Until now the map was invisible unless the read *failed*, which
+        // made "why is this old task in my active list?" unanswerable from the log. It is the first
+        // thing to check when the list holds a session you do not recognise.
+        this.log(next.size === 0
+          ? 'pending watcher: no session is blocked'
+          : `pending watcher: ${next.size} blocked — `
+            + [...next].map(([id, state]) => `${id}=${state}`).join(', '));
+        this.onChange();
+      }
     } finally {
       this._polling = false;
     }

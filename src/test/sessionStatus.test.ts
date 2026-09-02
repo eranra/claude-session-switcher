@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ABANDONED_TOOL_CALL_MS,
   PROMPT_WINDOW_MS,
   STREAMING_WINDOW_MS,
   TOOL_STALL_MS,
@@ -83,9 +84,37 @@ describe('claudeStatusFromTail', () => {
     expect(tail([assistantToolUse('Bash')], TOOL_STALL_MS + 1)).toBe('approval');
   });
 
-  it('an unanswered question is a question however long it has waited', () => {
+  it('an unanswered question stays a question for as long as answering it is plausible', () => {
     expect(tail([assistantToolUse('AskUserQuestion')], 1_000)).toBe('question');
     expect(tail([assistantToolUse('AskUserQuestion')], 3 * 3600_000)).toBe('question');
+    expect(tail([assistantToolUse('AskUserQuestion')], ABANDONED_TOOL_CALL_MS - 1_000))
+      .toBe('question');
+  });
+
+  it('a tool call silent for a day is abandoned, not blocked on you', () => {
+    // The bug this pins: `approval` and `question` are the two states the worklist never ages out,
+    // so a session killed mid-tool-call sat at the top of the list forever — on the strength of a
+    // file that will never be written again, with no process left to answer it. Observed in a real
+    // registry as a 47-hour-old `approval` no window held.
+    expect(tail([assistantToolUse('Edit')], ABANDONED_TOOL_CALL_MS + 1)).toBe('dormant');
+    expect(tail([assistantToolUse('AskUserQuestion')], ABANDONED_TOOL_CALL_MS + 1)).toBe('dormant');
+    expect(tail([{ type: 'tool_use', name: 'Bash' }], ABANDONED_TOOL_CALL_MS + 1)).toBe('dormant');
+  });
+
+  it('holds the blocked states right up to the boundary', () => {
+    // The bound must not eat a prompt you left overnight; a day is the point, not an approximation.
+    expect(tail([assistantToolUse('Edit')], ABANDONED_TOOL_CALL_MS - 1_000)).toBe('approval');
+  });
+
+  it('leaves a session its blocked state when a live signal still vouches for it', () => {
+    // The bound only touches what the *file* claims. A live pending approval outranks it, so a
+    // genuinely blocked session in an open window keeps its amber marker at any age.
+    const abandoned = tail([assistantToolUse('Edit')], ABANDONED_TOOL_CALL_MS + 1);
+    expect(resolveDisplayStatus(abandoned, {
+      pending: 'approval',
+      updatedAtMs: NOW - ABANDONED_TOOL_CALL_MS - 1,
+      nowMs: NOW,
+    })).toBe('approval');
   });
 
   it('a question among parallel tool calls wins — it needs typing, not a click', () => {

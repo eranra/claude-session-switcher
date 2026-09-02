@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 // unused by the pure helper under test.
 vi.mock('vscode', () => ({ extensions: { getExtension: vi.fn() } }));
 
-import { parseClaudeOpenState } from '../agents/ClaudeInspector';
+import { parseClaudeOpenState, statesWithoutPanel } from '../agents/ClaudeInspector';
 
 const EMPTY = { open: [], panels: [], states: [], active: null };
 
@@ -47,5 +47,31 @@ describe('parseClaudeOpenState', () => {
 
   it('returns empty state for malformed JSON', () => {
     expect(parseClaudeOpenState('nope')).toEqual(EMPTY);
+  });
+});
+
+describe('statesWithoutPanel', () => {
+  // `open` is panels ∪ states, so a session with state but no panel counts as held by this window —
+  // and therefore active, at any age, with nothing to age it out. Whether Claude drops a session's
+  // state when its panel closes is undocumented and was not reproducible, so the union is unchanged
+  // and this exists to make the question answerable from a log.
+  it('names the ids that only state accounts for', () => {
+    const state = parseClaudeOpenState('{"panels":["a"],"states":["a","b","c"],"active":"a"}');
+    expect(statesWithoutPanel(state)).toEqual(['b', 'c']);
+  });
+
+  it('is empty when every state has a panel', () => {
+    const state = parseClaudeOpenState('{"panels":["a","b"],"states":["a","b"],"active":"a"}');
+    expect(statesWithoutPanel(state)).toEqual([]);
+  });
+
+  it('does not complain about a panel with no state', () => {
+    // The union direction that is not suspicious: a panel is open, so the session is open.
+    const state = parseClaudeOpenState('{"panels":["a","b"],"states":["a"],"active":"a"}');
+    expect(statesWithoutPanel(state)).toEqual([]);
+  });
+
+  it('is empty for an unreachable manager', () => {
+    expect(statesWithoutPanel(parseClaudeOpenState(undefined))).toEqual([]);
   });
 });

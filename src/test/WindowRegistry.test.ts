@@ -96,4 +96,56 @@ describe('window registry files', () => {
     await removeWindowEntry(42, home);
     expect(fs.existsSync(path.join(windowsDir(home), '42.json'))).toBe(false);
   });
+
+  it('leaves no temporary file behind, and never reads one as an entry', async () => {
+    // Entries are written to a temp name and renamed, so a reader mid-write sees the old file or
+    // the new one, never a fragment. A leftover .tmp- must not be picked up as a window either.
+    await writeWindowEntry(entry(42), home);
+    const files = await fs.promises.readdir(windowsDir(home));
+    expect(files).toEqual(['42.json']);
+  });
+
+  it('ignores a temporary file that a crashed write left behind', async () => {
+    await writeWindowEntry(entry(42), home);
+    await fs.promises.writeFile(path.join(windowsDir(home), '43.json.tmp-abcd1234'), '{"pid":43}');
+    const live = await readLiveWindows({ homedir: home, isAlive: () => true, now: 2000 });
+    expect(live.map(w => w.pid)).toEqual([42]);
+  });
+
+  it('cleans up an unparsable entry once it is old enough to be certainly dead', async () => {
+    // The leak this pins: cleanup only ever ran *after* a successful parse, so a truncated write
+    // stayed forever. Two 0-byte entries sat in a real registry for a month.
+    const orphan = path.join(windowsDir(home), '99.json');
+    await fs.promises.mkdir(windowsDir(home), { recursive: true });
+    await fs.promises.writeFile(orphan, '');
+    const old = new Date(Date.now() - 26 * 3600 * 1000);
+    await fs.promises.utimes(orphan, old, old);
+
+    const live = await readLiveWindows({ homedir: home, isAlive: () => true, now: Date.now() });
+    expect(live).toEqual([]);
+    expect(fs.existsSync(orphan)).toBe(false);
+  });
+
+  it('leaves a fresh unparsable entry alone rather than risking a live window', async () => {
+    // Deleting on sight would make a window mid-recovery invisible to every other window until its
+    // next publish. Skipping it costs nothing in the meantime.
+    const fresh = path.join(windowsDir(home), '98.json');
+    await fs.promises.mkdir(windowsDir(home), { recursive: true });
+    await fs.promises.writeFile(fresh, '{ partial');
+
+    const live = await readLiveWindows({ homedir: home, isAlive: () => true, now: Date.now() });
+    expect(live).toEqual([]);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  it('cleans up an entry that parses but is not a window record', async () => {
+    const bogus = path.join(windowsDir(home), '97.json');
+    await fs.promises.mkdir(windowsDir(home), { recursive: true });
+    await fs.promises.writeFile(bogus, '{"hello":"world"}');
+    const old = new Date(Date.now() - 26 * 3600 * 1000);
+    await fs.promises.utimes(bogus, old, old);
+
+    await readLiveWindows({ homedir: home, isAlive: () => true, now: Date.now() });
+    expect(fs.existsSync(bogus)).toBe(false);
+  });
 });

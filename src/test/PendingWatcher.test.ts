@@ -84,6 +84,42 @@ describe('PendingWatcher', () => {
     expect(onChange).toHaveBeenCalledTimes(1); // same map — no second repaint
   });
 
+  it('names every blocked session in the log, so a stale one can be found', async () => {
+    // These are the only two states the worklist never ages out, so one stale entry pins a row at
+    // the top of the list indefinitely. Before this, the map was invisible unless the read failed,
+    // which made "why is this old task in my active list?" unanswerable from the log.
+    const lines: string[] = [];
+    const listAllPending = vi.fn().mockResolvedValue([
+      pending({ taskId: 'task-1' }),
+      pending({ taskId: 'task-2', toolName: 'ask_followup_question' }),
+    ]);
+    const w = new PendingWatcher({ listAllPending }, msg => lines.push(msg));
+    await w.poll();
+    expect(lines.join('\n')).toContain('task-1=approval');
+    expect(lines.join('\n')).toContain('task-2=question');
+  });
+
+  it('says so when nothing is blocked, rather than going quiet', async () => {
+    // Going from "two blocked" to silence would read as a failed poll. The clearing is the news.
+    const lines: string[] = [];
+    const listAllPending = vi.fn()
+      .mockResolvedValueOnce([pending()])
+      .mockResolvedValueOnce([]);
+    const w = new PendingWatcher({ listAllPending }, msg => lines.push(msg));
+    await w.poll();
+    await w.poll();
+    expect(lines.some(l => l.includes('no session is blocked'))).toBe(true);
+  });
+
+  it('does not repeat itself while the map holds still', async () => {
+    const lines: string[] = [];
+    const listAllPending = vi.fn().mockResolvedValue([pending()]);
+    const w = new PendingWatcher({ listAllPending }, msg => lines.push(msg));
+    await w.poll();
+    await w.poll();
+    expect(lines).toHaveLength(1);
+  });
+
   it('does not overlap reads', async () => {
     let release = () => { /* replaced below */ };
     const gate = new Promise<PendingApproval[]>(resolve => { release = () => resolve([]); });

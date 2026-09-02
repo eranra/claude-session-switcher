@@ -5,6 +5,42 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.2 — Stop a dead session sitting at the top of the worklist
+
+A session killed mid-tool-call was pinned as `approval` **forever**. The two blocked states are the
+only ones the worklist never ages out — on purpose, because a session waiting on you is stuck rather
+than stale — so it sat at the top of the list for weeks, on the strength of a transcript that would
+never be written again, with no process left to answer it and no way to clear it. Found in a real
+registry as a 47-hour-old `approval` that no window held.
+
+An unanswered tool call now reads `dormant` once it has been silent for a day
+(`ABANDONED_TOOL_CALL_MS`). Fixed in `sessionStatus.ts` rather than in the worklist filter, so the
+panel and Telegram both get it from one rule. Nothing is lost by the bound: a session whose window is
+still open stays in the worklist through the live probe, which never consults the status, and Bob's
+live pending approvals still upgrade a row at any age. It only bites when *no* live signal agrees
+with the file — the case where the file is the thing that is wrong.
+
+**The window registry now writes atomically.** `writeWindowEntry` truncated and wrote in place, so a
+reader on its timer could catch a fragment, and a process killed mid-write left one behind for good —
+two 0-byte entries had been sitting in a real registry since July. It writes to a temporary name and
+renames, like `TopicStore` already did. Cleanup was the other half: an unparsable entry was skipped
+but never deleted, because the old code only removed a file *after* parsing it. Unparsable entries are
+now cleaned once they are older than the 24h staleness bound — age-gated, so a window mid-recovery is
+never made invisible to its peers.
+
+**Two things that could hide the same symptom are now visible in the log**, rather than needing a
+guess:
+
+- `PendingWatcher` names every blocked session on each change, and says so when nothing is blocked.
+  This map is the only input that can make a row `approval` or `question`, and those never age out —
+  one stale entry pins a row indefinitely. It used to log only when the *read failed*, which made
+  "why is this old task in my active list?" unanswerable.
+- The Claude inspector calls out sessions that have state but no open panel. `open` is
+  `sessionPanels ∪ sessionStates`, so each of those counts as held by the window, and therefore
+  active at any age. Whether Claude drops a session's state when its panel closes is undocumented and
+  was not reproducible, so the union is **unchanged** — this is instrumentation, not a behaviour
+  change, and the log now says which ids to suspect.
+
 ### 0.8.1 — Telegram shows the active sessions, and only those
 
 The Telegram group used to list every session the machine had ever seen. A fleet accumulates

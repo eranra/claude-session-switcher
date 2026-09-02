@@ -70,6 +70,29 @@ export const TOOL_STALL_MS = 45_000;
  */
 export const UNREAD_MAX_AGE_MS = 24 * 3600_000;
 
+/**
+ * When an unanswered tool call stops meaning "waiting for you" and starts meaning "abandoned".
+ *
+ * A transcript cannot tell those two apart on its own — both look like a tool call with nothing
+ * written after it. `TOOL_STALL_MS` separates "running" from "blocked"; this separates "blocked"
+ * from "the process that was blocked is gone".
+ *
+ * The bound has to exist. `approval` and `question` are the two states the worklist filter never
+ * ages out (`isBlockedOnYou`) — deliberately, because a session waiting on you is stuck rather than
+ * stale. Without an upper bound here, one session killed mid-tool-call is `approval` **forever**:
+ * it sits at the top of the worklist for weeks, on the strength of a file that will never be
+ * written again, and there is nothing you can do to clear it because there is no process left to
+ * answer.
+ *
+ * A day, matching `UNREAD_MAX_AGE_MS`, for the same reason: after that long, silence is evidence
+ * of abandonment rather than of patience. Nothing is lost by being wrong here — a session whose
+ * window is genuinely still open stays in the worklist through the live probe, which does not
+ * consult the status at all, and Bob's live pending approvals still upgrade it through
+ * `resolveDisplayStatus`. What the bound removes is only the case where *no* live signal agrees
+ * with the file, which is exactly the case where the file is the one lying.
+ */
+export const ABANDONED_TOOL_CALL_MS = 24 * 3600_000;
+
 // ── Question tools ────────────────────────────────────────────────────────────
 
 /**
@@ -161,8 +184,15 @@ function toolNames(record: JsonlRecord): string[] {
   return record.type === 'tool_use' ? [record.name ?? ''] : [];
 }
 
-/** An unfinished tool call: a question always, an approval once the file goes quiet. */
+/**
+ * An unfinished tool call: running while the file still moves, blocked on you once it stops, and
+ * abandoned once it has been silent for a day.
+ *
+ * The last step is checked first because it outranks the others: an abandoned call is not a
+ * question you have failed to answer, whatever tool asked it.
+ */
 function toolCallStatus(names: readonly string[], quietMs: number): SessionStatus {
+  if (quietMs >= ABANDONED_TOOL_CALL_MS) { return 'dormant'; }
   if (names.some(isQuestionTool)) { return 'question'; }
   return quietMs >= TOOL_STALL_MS ? 'approval' : 'working';
 }

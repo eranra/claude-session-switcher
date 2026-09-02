@@ -77,6 +77,24 @@ function cleanIds(value: unknown): string[] {
   return [...new Set(value.filter((x): x is string => typeof x === 'string' && x.length > 0))];
 }
 
+/**
+ * Ids in `states` that no open panel accounts for.
+ *
+ * `open` is the union of the two, so every one of these counts as a session this window holds — and
+ * therefore as *active*, at any age, with no way to age out. That is right if Claude drops a
+ * session's state when its panel closes, and wrong if it keeps it: then every session ever opened in
+ * a window stays active until the window is reloaded.
+ *
+ * Which of those Claude actually does is not documented and was not reproducible on the machine
+ * where the over-long session list was reported, so the union is left exactly as it was. This
+ * function exists to make the question answerable from a log instead of by guesswork: when the list
+ * holds sessions you do not recognise, these are the ids to suspect.
+ */
+export function statesWithoutPanel(state: ClaudeOpenState): string[] {
+  const panels = new Set(state.panels);
+  return state.states.filter(id => !panels.has(id));
+}
+
 /** Parse the JSON payload READ_OPEN_FN returns into a ClaudeOpenState.
  *  `open` is derived as the union of `panels` and `states`, so existing callers
  *  that only care whether a session is held by this window keep working.
@@ -271,6 +289,14 @@ export async function getOpenClaudeSessionIds(log: (msg: string) => void): Promi
     : diag;
   if (diag === 'ok') {
     log(`claude inspector: panels=[${state.panels.join(', ')}] states=[${state.states.join(', ')}] active=${state.active}`);
+    // Called out separately, because it is buried in the line above and it is the difference between
+    // "this window holds two sessions" and "this window has held twenty since it started".
+    const orphans = statesWithoutPanel(state);
+    if (orphans.length > 0) {
+      log(
+        `claude inspector: ${orphans.length} session(s) have state but no open panel, and still `
+        + `count as open here: ${orphans.join(', ')}`);
+    }
   }
   return state;
 }

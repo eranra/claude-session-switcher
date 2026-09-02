@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -90,10 +91,23 @@ export function windowsDir(homedir: string = os.homedir()): string {
   return path.join(homedir, '.claude', 'session-sitter', 'windows');
 }
 
+/**
+ * Publish this window's entry, atomically.
+ *
+ * Written to a temporary name and renamed into place, because every other window *reads* this
+ * directory on a timer. A direct `writeFile` truncates first, so a reader arriving mid-write sees an
+ * empty or half-written file — and a process killed between the truncate and the write leaves one
+ * behind permanently. Both were observed: two 0-byte entries sat in a real registry for a month.
+ * `rename` is atomic on every platform this runs on, so a reader sees either the old entry or the
+ * new one, never a fragment. `TopicStore.save` writes for the same reason.
+ */
 export async function writeWindowEntry(entry: WindowEntry, homedir: string = os.homedir()): Promise<void> {
   const dir = windowsDir(homedir);
   await fs.promises.mkdir(dir, { recursive: true });
-  await fs.promises.writeFile(path.join(dir, `${entry.pid}.json`), JSON.stringify(entry), 'utf8');
+  const target = path.join(dir, `${entry.pid}.json`);
+  const tmp = `${target}.tmp-${randomBytes(4).toString('hex')}`;
+  await fs.promises.writeFile(tmp, JSON.stringify(entry), 'utf8');
+  await fs.promises.rename(tmp, target);
 }
 
 export async function removeWindowEntry(pid: number, homedir: string = os.homedir()): Promise<void> {
@@ -110,18 +124,47 @@ export async function readLiveWindows(opts: {
   const now = opts.now ?? Date.now();
   const dir = windowsDir(homedir);
   let files: string[];
-  try { files = (await fs.promises.readdir(dir)).filter(f => f.endsWith('.json')); } catch { return []; }
+  try {
+    files = (await fs.promises.readdir(dir))
+      .filter(f => f.endsWith('.json') && !f.includes('.tmp-'));
+  } catch { return []; }
   const out: WindowEntry[] = [];
   for (const file of files) {
+    const full = path.join(dir, file);
+    let data: WindowEntry;
     try {
-      const data = JSON.parse(await fs.promises.readFile(path.join(dir, file), 'utf8')) as WindowEntry;
-      if (typeof data.pid !== 'number' || !Array.isArray(data.workspaceFolders)) { continue; }
-      if (!isAlive(data.pid) || now - data.updatedAt > STALE_MS) {
-        try { await fs.promises.unlink(path.join(dir, file)); } catch { /* ignore */ }
-        continue;
-      }
-      out.push(data);
-    } catch { /* malformed — skip */ }
+      data = JSON.parse(await fs.promises.readFile(full, 'utf8')) as WindowEntry;
+    } catch {
+      // Unreadable or not JSON. Skipped either way, but it also has to be *cleaned*: the old code
+      // only ever deleted an entry after parsing it, so a truncated write leaked forever.
+      await unlinkIfStale(full, now);
+      continue;
+    }
+    if (typeof data.pid !== 'number' || !Array.isArray(data.workspaceFolders)) {
+      await unlinkIfStale(full, now);
+      continue;
+    }
+    if (!isAlive(data.pid) || now - data.updatedAt > STALE_MS) {
+      try { await fs.promises.unlink(full); } catch { /* ignore */ }
+      continue;
+    }
+    out.push(data);
   }
   return out;
+}
+
+/**
+ * Delete a file we could not make sense of — but only once it is old enough to be certainly dead.
+ *
+ * Age-gated rather than deleted on sight. Writes are atomic now, so a fragment should no longer be
+ * possible; if one appears anyway it is more likely a window mid-recovery than a leak, and deleting
+ * a live window's entry would make it invisible to every other window until its next 60-second
+ * publish. Waiting costs nothing: an unparsable file is skipped in the meantime either way.
+ */
+async function unlinkIfStale(full: string, now: number): Promise<void> {
+  try {
+    const stat = await fs.promises.stat(full);
+    if (now - stat.mtimeMs <= STALE_MS) { return; }
+    await fs.promises.unlink(full);
+  } catch { /* vanished, or not ours to delete */ }
 }
