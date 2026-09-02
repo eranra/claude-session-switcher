@@ -3,20 +3,27 @@
 Drive your sessions from Telegram: see what is running, read a session, and type into it from your
 phone. Off by default.
 
-Each session becomes a **topic** in a Telegram forum group, so the thread you are typing in *is* the
-session you are talking to. There is no "which session am I addressing?" state to get wrong.
+Each **active** session becomes a **topic** in a Telegram forum group, so the thread you are typing
+in *is* the session you are talking to. There is no "which session am I addressing?" state to get
+wrong.
 
 ```
 GROUP "Session Sitter"  (Topics enabled)
 
-  # General                       ← the live session list, /sessions /new /who /help
-  # 🟠 claude · sitter / sort order        2
-  # 🔄 bob · payments / refund flow
-  # ⚪ codex · scratch / spike
+  # General                            ← the active list, /sessions /history /new /who /help
+  # 🟠 sitter / sort order · claude              2
+  # 🔄 payments / refund flow · bob
+  # ⚪ scratch / spike · codex@laptop2
 ```
 
 Open a topic and you get that session's turns as they happen, its supervision cards, and a text box
 that sends straight into the agent.
+
+Every name reads the same way: **status, workspace, title, then the agent and the machine.** The
+status icon leads because "what needs me?" is the question the sidebar is being asked. The workspace
+comes next because it says which piece of work this is. Which agent it is, and which machine it runs
+on, are worth knowing but never worth reading first — and the machine is shown only when it is not
+this one.
 
 ---
 
@@ -89,14 +96,60 @@ peer discovery — but they are marked read-only, because only that machine can 
 
 | Command | Effect |
 |---|---|
-| `/sessions` | Redraw the session list. One pinned message, edited in place. |
+| `/sessions` | Redraw the list of active sessions. One pinned message, edited in place. |
+| `/history` | The earlier sessions. Tap one to bring it back into the active list. |
 | `/new` | Start a session: pick a workspace, then Claude or Bob. |
 | `/who` | Which window owns which session, and why. Explains a read-only row. |
 | `/help` | The commands, and the current write limits. |
 
-The list is grouped by machine and then by workspace, **not** by time. It is edited in place, and a
-time ordering would reshuffle every row on every poll. Rows only move when a session appears or
-disappears.
+The list is ordered by workspace and then title, **not** by time. It is edited in place, and a time
+ordering would reshuffle every row on every poll. A row moves only when a session appears,
+disappears, or changes status.
+
+Once you have asked for it, the list **keeps itself current** — it is redrawn whenever the fleet
+changes, so a session that leaves the worklist leaves the list without you tapping Refresh. The
+ticking ages are deliberately not treated as a change: Telegram rate-limits edits to a pinned
+message, and re-drawing every few seconds to move "2m" to "3m" would spend that budget on nothing.
+
+### The list holds the active sessions, and only those
+
+The group shows the same sessions the **Sessions panel** shows, and nothing else. A machine
+accumulates hundreds of past sessions; a list of hundreds answers no question, because you cannot
+find the one that needs you in it.
+
+Both surfaces apply one rule, in [`sessionActivity.ts`](../src/sessionActivity.ts), so they cannot
+disagree about the same fleet:
+
+- **Claude / Bob** — active when a live window reports the session open. Failing that, active while
+  it is blocked on you (at any age — a session waiting for your approval is stuck, not stale), or
+  while it was working recently.
+- **Codex / VS Code Chat** — no liveness signal exists for these, so recency is the only honest
+  proxy: active while updated inside `sessionSitter.probelessActiveWindowMinutes`.
+
+**A session that leaves the active list has its topic closed**, right then — not after a timeout.
+Closed, never deleted: the scrollback and the search stay. A topic is also closed after
+`sessionSitter.telegram.idleTopicCloseHours` of quiet even while its session is still active, so a
+session sitting open in a window for a week does not hold a thread open beside the live ones.
+
+A closed topic **reopens when there is a new turn to post**. Reopening on "the session is still
+active" instead would fight the idle rule — closed every quiet period, reopened on the next pass,
+forever — and new turns are the thing you would actually have missed. A topic you open by hand is
+left alone for ten minutes whichever list its session is in, so tapping a `/history` row never leads
+to a thread that closes under you.
+
+### `/history` — bringing a session back
+
+`/history` lists what the active list does not, newest first, one button per session. Tapping one:
+
+1. opens (or creates) its topic, so you can read it immediately, and
+2. focuses the session in its IDE on its own machine.
+
+The second step is what actually returns it to the active list, because "active" means a window has
+it open. So the panel and the Telegram list agree about it again from the next pass — nothing is
+pinned into the list by hand, and there is no second notion of "active" to get out of step.
+
+If no window on the machine owns the session, the topic is still created and says so: you can read
+it, but there is nothing to focus and nothing to write to.
 
 ### In a session topic
 

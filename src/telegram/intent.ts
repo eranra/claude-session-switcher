@@ -23,6 +23,8 @@ export type Intent =
   | { kind: 'ignore'; reason: string }
   | { kind: 'unauthorized'; userId: string }
   | { kind: 'listSessions' }
+  /** The sessions the worklist does not show, so one can be brought back. */
+  | { kind: 'listHistory' }
   | { kind: 'help' }
   | { kind: 'who' }
   | { kind: 'newSessionMenu' }
@@ -108,6 +110,7 @@ export function classifyUpdate(update: Record<string, unknown>, auth: AuthConfig
   if (command !== null) {
     switch (command) {
       case 'sessions': case 'start': return { kind: 'listSessions' };
+      case 'history': return { kind: 'listHistory' };
       case 'help': return { kind: 'help' };
       case 'who': return { kind: 'who' };
       case 'new': return { kind: 'newSessionMenu' };
@@ -157,6 +160,12 @@ export type Callback =
   | { kind: 'history' }
   /** Open (or create) the topic for a session, addressed by a short index into the last list. */
   | { kind: 'openSession'; index: number }
+  /**
+   * Bring a history session back: open its topic and focus it in its IDE, which is what makes it
+   * active again. Indexed into the last `/history` list, kept separate from `openSession` so a
+   * stale index can never resolve against the wrong list.
+   */
+  | { kind: 'loadHistory'; index: number }
   /** Launch a session: workspace by index into the last `/new` menu, plus the agent. */
   | { kind: 'launch'; index: number; source: 'claude' | 'bob' }
   | { kind: 'focus'; sessionId: string }
@@ -170,6 +179,7 @@ export function encodeCallback(cb: Callback): string {
     case 'newMenu': return 'rc|newmenu';
     case 'history': return 'rc|history';
     case 'openSession': return `rc|open|${cb.index}`;
+    case 'loadHistory': return `rc|load|${cb.index}`;
     case 'launch': return `rc|launch|${cb.index}|${cb.source}`;
     case 'focus': return `rc|focus|${cb.sessionId}`;
     case 'transcript': return `rc|tx|${cb.sessionId}`;
@@ -191,6 +201,12 @@ export function decodeCallback(raw: string): Callback {
       const index = Number(arg);
       return Number.isInteger(index) && index >= 0
         ? { kind: 'openSession', index }
+        : { kind: 'unknown', raw };
+    }
+    case 'load': {
+      const index = Number(arg);
+      return Number.isInteger(index) && index >= 0
+        ? { kind: 'loadHistory', index }
         : { kind: 'unknown', raw };
     }
     case 'launch': {

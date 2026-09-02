@@ -35,6 +35,14 @@ export interface TopicRecord {
   closed: boolean;
   /** Last time this session showed activity — drives idle auto-close. */
   lastActivityAt: number;
+  /**
+   * When this topic was last opened — created, or reopened.
+   *
+   * Separate from `createdAt` because it is what protects a topic you opened *by hand* from being
+   * closed again immediately. Asking for a history session's topic and having it vanish on the next
+   * pass would make the button look broken; see `topicsToPrune`.
+   */
+  openedAt: number;
   createdAt: number;
 }
 
@@ -54,6 +62,11 @@ export function parseTopic(raw: string): TopicRecord | null {
       mirroredTurns: typeof d.mirroredTurns === 'number' ? d.mirroredTurns : 0,
       closed: d.closed === true,
       lastActivityAt: typeof d.lastActivityAt === 'number' ? d.lastActivityAt : 0,
+      // Records written before this field existed fall back to their creation time, which is when
+      // they were in fact last opened.
+      openedAt: typeof d.openedAt === 'number'
+        ? d.openedAt
+        : (typeof d.createdAt === 'number' ? d.createdAt : 0),
       createdAt: typeof d.createdAt === 'number' ? d.createdAt : 0,
     };
   } catch {
@@ -129,4 +142,39 @@ export function topicsToClose(
   topics: TopicRecord[], now: number, idleMs: number,
 ): TopicRecord[] {
   return topics.filter(t => !t.closed && t.lastActivityAt > 0 && now - t.lastActivityAt > idleMs);
+}
+
+/**
+ * How long a freshly opened topic is left alone even though its session is not active.
+ *
+ * `/history` opens the topic of a session that is, by definition, not in the worklist. Without this
+ * window the reader would close it on the very next pass, and the button would look broken. Long
+ * enough to read a transcript and type a reply; short enough that a topic you abandon still tidies
+ * itself away.
+ */
+export const MANUAL_OPEN_GRACE_MS = 10 * 60_000;
+
+/**
+ * Topics whose session has dropped out of the active worklist.
+ *
+ * The Telegram group is meant to show the same set of sessions the panel does, so a session leaving
+ * the worklist has to leave the group's topic list too — otherwise every session that ever ran
+ * accumulates as a thread and the sidebar becomes unreadable, which is the state this fixes.
+ *
+ * Closed, not deleted, for the same reason as `topicsToClose`: the scrollback and the search stay,
+ * and the topic reopens by itself when the session has something new to say.
+ *
+ * A topic opened within `MANUAL_OPEN_GRACE_MS` is left alone, because you asked for it.
+ *
+ * `activeSessionIds` **must** be a set the caller actually knows. Passing an empty set because the
+ * session list has not loaded yet would close every topic in the group, so the caller checks that
+ * first — see `pruneInactiveTopics`.
+ */
+export function topicsToPrune(
+  topics: TopicRecord[], activeSessionIds: ReadonlySet<string>, now: number,
+  graceMs: number = MANUAL_OPEN_GRACE_MS,
+): TopicRecord[] {
+  return topics.filter(t => !t.closed
+    && !activeSessionIds.has(t.sessionId)
+    && !(t.openedAt > 0 && now - t.openedAt < graceMs));
 }

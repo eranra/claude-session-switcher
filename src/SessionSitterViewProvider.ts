@@ -16,28 +16,22 @@ import {
   type SessionSortMode,
 } from './sessionSort';
 import { resolveWorkspaceColor, type WorkspaceBadgeColor } from './workspaceColors';
-import { isBlockedOnYou, isWorklistSignal, resolveDisplayStatus } from './sessionStatus';
+import { resolveDisplayStatus } from './sessionStatus';
+import {
+  DEFAULT_PROBELESS_ACTIVE_WINDOW_MINUTES, partitionByActivity,
+} from './sessionActivity';
 
 // The Sessions view is a live worklist: only sessions the user can currently act on.
 // Everything else goes to History. Both partitions stay sorted by recency and capped.
+// What counts as active lives in `sessionActivity.ts`, because Telegram applies the same rule.
 const SESSIONS_LIMIT = 20;
 const HISTORY_LIMIT = 50;
 
-// Sources that expose no live-process signal at all (no extension host to ask). For those,
-// recency is the only available proxy for "you are working in this right now" — see
-// `_partitionSessions`. Named and configurable rather than hidden.
-const PROBELESS_SOURCES: ReadonlySet<string> = new Set(['codex', 'chat']);
-const DEFAULT_PROBELESS_ACTIVE_WINDOW_MINUTES = 120;
-
-// How long a `working` status alone keeps a Claude/Bob session in the worklist when no probe
-// reports it open. The fallback exists to survive a momentary probe failure (a WSL2 /
-// inspector hiccup), so it only needs to outlast the hiccup — not the session. Without a
-// bound, one abandoned mid-turn transcript sits in the worklist forever, because its status
-// is read from a file that will never change again.
-//
-// The two blocked-on-you states are exempt: a session waiting for your approval is not stale,
-// it is stuck, and moving it to History hides the one row you actually need to see.
-const STALE_FALLBACK_WINDOW_MS = 120 * 60_000;
+// How long a partition snapshot may be served to an outside caller before it is recomputed.
+// `_partitionSessions` runs the Bob and Claude probes, and the Telegram loop asks far more often
+// than the panel repaints; a couple of seconds is fresh enough for a chat message and stops the
+// inspector being hit on every pass.
+const PARTITION_CACHE_MS = 2_000;
 
 /** Key under which the last-viewed timestamps live in the extension's global state. */
 export const LAST_VIEWED_KEY = 'sessionSitter.lastViewed';
@@ -84,6 +78,10 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
   private _registryTimer: ReturnType<typeof setInterval> | undefined;
   private _activity: SupervisionActivity | undefined;
   private _lastActivity: ActivityItem[] = [];
+  /** Last partition served to an outside caller, so the probes are not re-run on every ask. */
+  private _partitionCache: {
+    at: number; value: { active: ClaudeSession[]; history: ClaudeSession[] };
+  } | undefined;
   private readonly _recordsDir: string;
 
   constructor(
@@ -546,25 +544,18 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
   /**
    * Split sessions into the active worklist vs everything else (History).
    *
-   * Active means a session the user can act on right now. How that is decided depends on what
-   * the source can actually tell us:
+   * The rule itself lives in `sessionActivity.ts`, because Telegram shows the same worklist and a
+   * second copy of this reasoning would drift the first time either changed. What stays here is
+   * gathering the live signals the rule needs, all of which are panel-side:
    *
-   *  - **Bob / Claude** — their extension hosts hold the truth. Bob reports its open task ids
-   *    from the live `TaskManager`; Claude reports its open session ids from its manager. We
-   *    read this window fresh and union it with what other live windows published to the
-   *    registry, so the answer is cross-window. A session whose status is a live signal
-   *    (`working`, or blocked on you) is also treated as active, so one you are in still shows up
-   *    if the probe is momentarily silent (a WSL2 / inspector hiccup) — `working` only while it is
-   *    recent, see `STALE_FALLBACK_WINDOW_MS`; blocked-on-you at any age, because a session
-   *    waiting on your approval is stuck, not stale, and hiding it in History hides the one row
-   *    you need. A live report from a probe is authoritative at any age.
-   *  - **Codex / VS Code Chat** — no extension host to ask, no liveness signal of any kind.
-   *    Recency is the only honest proxy, so they count as active while updated within
-   *    `sessionSitter.probelessActiveWindowMinutes`.
+   *  - Bob reports its open task ids from the live `TaskManager`; Claude reports its open session
+   *    ids from its manager. This window is read fresh and unioned with what other live windows
+   *    published to the registry, so the answer is cross-window.
+   *  - The probeless window comes from settings.
    *
    * The status each session is filtered and rendered by is the **display** status — the raw one
    * with a live pending approval folded in and `finished` split by whether you have read it. It is
-   * resolved once, here, so the worklist, History and the row all agree about a session.
+   * resolved once, here, so the worklist, History, the row and Telegram all agree about a session.
    *
    * Both partitions stay sorted by recency.
    */
@@ -579,31 +570,38 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
       ...await readLiveWindows(),
       ...(this._sessionManager.getPeerWindows?.() ?? []),
     ];
-    const claudeOpenIds = new Set<string>([
-      ...localClaude.open,
-      ...windows.flatMap(w => w.openClaudeSessionIds ?? []),
-    ]);
-    const bobOpenIds = new Set<string>([
-      ...localBobIds,
-      ...windows.flatMap(w => w.openBobTaskIds ?? []),
-    ]);
-    const cutoff = Date.now() - this._probelessWindowMs();
-
-    const isActive = (s: ClaudeSession): boolean => {
-      if (PROBELESS_SOURCES.has(s.source)) { return s.updatedAt.getTime() >= cutoff; }
-      const reportedOpen = s.source === 'bob'
-        ? bobOpenIds.has(s.sessionId)
-        : claudeOpenIds.has(s.sessionId);
-      if (reportedOpen) { return true; }
-      // Blocked on you: stuck, not stale. No age bound — it stays until you deal with it.
-      if (isBlockedOnYou(s.status)) { return true; }
-      // Anything else is a fallback, not a live signal, so it must not outlive its window.
-      return isWorklistSignal(s.status)
-        && s.updatedAt.getTime() >= Date.now() - STALE_FALLBACK_WINDOW_MS;
-    };
-
     const all = this._sortedByRecency().map(s => this._withDisplayStatus(s));
-    return { active: all.filter(isActive), history: all.filter(s => !isActive(s)) };
+    return partitionByActivity(all, {
+      claudeOpenIds: new Set<string>([
+        ...localClaude.open,
+        ...windows.flatMap(w => w.openClaudeSessionIds ?? []),
+      ]),
+      bobOpenIds: new Set<string>([
+        ...localBobIds,
+        ...windows.flatMap(w => w.openBobTaskIds ?? []),
+      ]),
+      probelessWindowMs: this._probelessWindowMs(),
+      nowMs: Date.now(),
+    });
+  }
+
+  /**
+   * The worklist and History as the panel sees them, for a surface outside the panel.
+   *
+   * Telegram calls this rather than reading `SessionManager` directly, so its list *is* the
+   * panel's list: same active rule, same display statuses, same order. Anything else and the two
+   * views of one fleet disagree, which is the bug this exists to prevent.
+   *
+   * Briefly cached, because the computation runs the Bob and Claude probes and the Telegram loop
+   * asks far more often than the panel repaints.
+   */
+  public async sessionPartition(): Promise<{ active: ClaudeSession[]; history: ClaudeSession[] }> {
+    const now = Date.now();
+    const cached = this._partitionCache;
+    if (cached !== undefined && now - cached.at < PARTITION_CACHE_MS) { return cached.value; }
+    const value = await this._partitionSessions();
+    this._partitionCache = { at: now, value };
+    return value;
   }
 
   /**

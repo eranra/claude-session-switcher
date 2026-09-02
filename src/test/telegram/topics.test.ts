@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { TopicStore, parseTopic, topicsToClose, type TopicRecord } from '../../telegram/topics';
+import {
+  MANUAL_OPEN_GRACE_MS, TopicStore, parseTopic, topicsToClose, topicsToPrune, type TopicRecord,
+} from '../../telegram/topics';
 import { topicsDir } from '../../telegram/bus';
 
 let home: string;
@@ -20,10 +22,11 @@ function record(over: Partial<TopicRecord> = {}): TopicRecord {
     threadId: 7,
     sessionId: 's1',
     source: 'claude',
-    name: '🟡 claude · app / a title',
+    name: '🟠 app / a title · claude',
     mirroredTurns: 3,
     closed: false,
     lastActivityAt: 1000,
+    openedAt: 500,
     createdAt: 500,
     ...over,
   };
@@ -32,6 +35,14 @@ function record(over: Partial<TopicRecord> = {}): TopicRecord {
 describe('parseTopic', () => {
   it('round-trips a record', () => {
     expect(parseTopic(JSON.stringify(record()))).toEqual(record());
+  });
+
+  it('reads a record written before openedAt existed, using its creation time', () => {
+    // An installed extension already has topic files on disk from the previous version. Treating a
+    // missing openedAt as 0 would strip the grace window from every one of them.
+    const legacy: Record<string, unknown> = { ...record({ createdAt: 1234 }) };
+    delete legacy.openedAt;
+    expect(parseTopic(JSON.stringify(legacy))?.openedAt).toBe(1234);
   });
 
   it('rejects a record with no thread or session', () => {
@@ -134,5 +145,54 @@ describe('topicsToClose', () => {
   it('skips a topic with no recorded activity', () => {
     // Activity of 0 means "not known yet", not "quiet since the epoch".
     expect(topicsToClose([record({ lastActivityAt: 0 })], Date.now(), idleMs)).toEqual([]);
+  });
+});
+
+describe('topicsToPrune', () => {
+  // Well past MANUAL_OPEN_GRACE_MS, so the grace window is out of the way unless a test wants it.
+  const LATER = 500 + MANUAL_OPEN_GRACE_MS * 10;
+
+  it('closes the topic of a session that has left the active list', () => {
+    // The group's topic list has to equal the panel's session list, or every session that ever ran
+    // accumulates as a dead thread in the sidebar.
+    const gone = record({ threadId: 7, sessionId: 'gone' });
+    expect(topicsToPrune([gone], new Set(['still-here']), LATER)).toEqual([gone]);
+  });
+
+  it('leaves the topic of an active session alone', () => {
+    const live = record({ threadId: 7, sessionId: 'live' });
+    expect(topicsToPrune([live], new Set(['live']), LATER)).toEqual([]);
+  });
+
+  it('never closes an already-closed topic twice', () => {
+    const closed = record({ sessionId: 'gone', closed: true });
+    expect(topicsToPrune([closed], new Set<string>(), LATER)).toEqual([]);
+  });
+
+  it('spares a topic you just opened by hand', () => {
+    // `/history` opens the topic of a session that is by definition not active. Closing it on the
+    // next pass would make the button look broken.
+    const justOpened = record({ sessionId: 'gone', openedAt: 1_000 });
+    expect(topicsToPrune([justOpened], new Set<string>(), 1_000 + 60_000)).toEqual([]);
+  });
+
+  it('closes it once the grace window has passed', () => {
+    const opened = record({ sessionId: 'gone', openedAt: 1_000 });
+    expect(topicsToPrune([opened], new Set<string>(), 1_000 + MANUAL_OPEN_GRACE_MS + 1))
+      .toEqual([opened]);
+  });
+
+  it('does not treat an unknown open time as freshly opened', () => {
+    // 0 means "not recorded", so it must not buy an old topic an indefinite reprieve.
+    const legacy = record({ sessionId: 'gone', openedAt: 0 });
+    expect(topicsToPrune([legacy], new Set<string>(), 60_000)).toEqual([legacy]);
+  });
+
+  it('would close everything for an empty active set — which is why the caller guards it', () => {
+    // Documented deliberately: this function cannot tell "nothing is active" from "the session
+    // list has not loaded yet". `pruneInactiveTopics` makes that distinction before calling.
+    const a = record({ threadId: 1, sessionId: 'a' });
+    const b = record({ threadId: 2, sessionId: 'b' });
+    expect(topicsToPrune([a, b], new Set<string>(), LATER)).toEqual([a, b]);
   });
 });

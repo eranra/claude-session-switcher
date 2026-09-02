@@ -34,6 +34,7 @@ session-sitter/
 │   ├── SessionManager.ts               # the four session stores; scanning + transcripts
 │   ├── SessionSitterViewProvider.ts  # the sidebar webview + the activity feed
 │   ├── sessionRows.ts                  # Bob rows -> sessions, shared local + remote
+│   ├── sessionActivity.ts              # active worklist vs History (pure; panel + Telegram)
 │   ├── sessionSort.ts                  # the session-list orders (pure, total comparators)
 │   ├── workspaceColors.ts              # per-workspace pill colour (pure)
 │   ├── WindowRegistry.ts               # cross-window focus + published open-session ids
@@ -232,6 +233,19 @@ Status is derived by [`sessionStatus.ts`](../src/sessionStatus.ts) — a pure mo
 no I/O and no clock of its own, so all six states are unit-testable. `SessionManager` does the
 reading (the transcript tail, the Bob rows); that module does the deciding. Every rule, per agent,
 is documented in [`STATUS-INDICATORS.md`](STATUS-INDICATORS.md).
+
+### Active or History
+
+Whether a session belongs in the live worklist or in History is a separate question from what its
+status is, and it lives in [`sessionActivity.ts`](../src/sessionActivity.ts) — also pure, also given
+its live signals as arguments.
+
+It is a module rather than a closure in the view provider because **two** surfaces ask it: the panel
+and Telegram. That was the bug the split fixed — the panel showed a tight worklist while Telegram
+showed every session it had ever seen, so the two disagreed about one fleet and neither could be
+trusted. `SessionSitterViewProvider.sessionPartition()` gathers the live signals (the Bob and Claude
+probes, the window registry, the probeless window setting), applies the rule, and hands the same two
+lists to both surfaces.
 
 ### `SessionSitterViewProvider`
 

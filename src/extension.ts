@@ -385,6 +385,9 @@ export function activate(context: vscode.ExtensionContext) {
     remoteControl = new RemoteControlService({
       config: remoteControlConfig,
       sessionManager,
+      // The panel is the single source of truth for which sessions are active, so Telegram shows
+      // the same worklist the sidebar does rather than every session the machine has ever seen.
+      partition: () => provider.sessionPartition(),
       bobSender: sender,
       claudeSender,
       launcher: new VsCodeSessionLauncher(

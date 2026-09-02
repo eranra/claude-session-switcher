@@ -5,6 +5,42 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.1 — Telegram shows the active sessions, and only those
+
+The Telegram group used to list every session the machine had ever seen. A fleet accumulates
+hundreds, and a list of hundreds answers no question — you cannot find the one that needs you in it.
+It now shows exactly what the **Sessions panel** shows: the active worklist.
+
+Not "the same by convention". The rule moved into `src/sessionActivity.ts`, a pure module both
+surfaces call, so there is one definition of *active* and nothing to keep in sync. Telegram also
+reads the panel's **display** statuses, so an amber row in the sidebar is an amber row on your phone.
+
+A session that leaves the active list has its topic **closed**, right then rather than after a
+timeout — closed, never deleted, so the scrollback stays and the topic reopens by itself if the
+session comes back.
+
+```
+  # General                            ← /sessions /history /new /who /help
+  # 🟠 sitter / sort order · claude              2
+  # 🔄 payments / refund flow · bob
+  # ⚪ scratch / spike · codex@laptop2
+```
+
+**Names now read status → workspace → title → agent → machine.** The workspace comes first because
+it says which piece of work this is, which is the question a list of twenty rows is actually asked.
+The agent and the machine trail, and the machine appears only when it is not this one. The list is
+no longer grouped by host — that heading put the machine name above the workspace, which is exactly
+backwards. Same order in the topic name, the list row, the topic header and `/who`.
+
+**`/history`** reaches everything the worklist does not, newest first. Tapping a row opens its topic
+*and* focuses the session in its IDE — the second step is what returns it to the active list, since
+active means a window has it open. So there is no second, Telegram-only notion of active to drift
+out of step with the panel.
+
+The status glyphs are unchanged but now pinned by a test against
+[`docs/STATUS-INDICATORS.md`](docs/STATUS-INDICATORS.md), which gained a Telegram column. Amber is
+your turn wherever you read it.
+
 ### Telegram as a remote interface to your sessions
 
 Your sessions now appear as **topics** in a Telegram forum group. Open a topic to read that session's
@@ -14,10 +50,10 @@ turns as they happen, and type in it to send a message straight into the agent. 
 ```
 GROUP "Session Sitter"  (Topics enabled)
 
-  # General                       ← the live list, /sessions /new /who /help
-  # 🟠 claude · sitter / sort order        2
-  # 🔄 bob · payments / refund flow
-  # ⚪ codex · scratch / spike
+  # General                            ← the live list
+  # 🟠 sitter / sort order · claude              2
+  # 🔄 payments / refund flow · bob
+  # ⚪ scratch / spike · codex@laptop2
 ```
 
 Topics were chosen over a menu message or a card-per-session because the thread *is* the selection:
@@ -25,9 +61,9 @@ there is no "which session am I talking to?" state to get out of sync, unread ba
 and each session keeps its own scrollback. Supervision cards for a session now land in that session's
 topic instead of one undifferentiated feed.
 
-A topic appears automatically for any session that needs you or is running — `approval`, `question`,
-`finished`, `working` — and on demand for the quiet ones. Its name leads with the status, so the topic
-list doubles as a status board in the same amber / green / grey language the panel uses. A topic is
+A topic appears automatically for every active session, and on demand for the quiet ones (see the
+entry above for which sessions count as active). Its name leads with the status, so the topic list
+doubles as a status board in the same amber / green / grey language the panel uses. A topic is
 **closed** — never deleted — after `sessionSitter.telegram.idleTopicCloseHours` of quiet, reopening by
 itself if the session revives.
 

@@ -105,6 +105,7 @@ describe('classifyUpdate — commands', () => {
   it.each([
     ['/sessions', 'listSessions'],
     ['/start', 'listSessions'],
+    ['/history', 'listHistory'],
     ['/help', 'help'],
     ['/who', 'who'],
     ['/new', 'newSessionMenu'],
@@ -177,12 +178,22 @@ describe('classifyUpdate — button taps', () => {
   });
 });
 
+describe('the active list and the history list are addressed separately', () => {
+  it('encodes an open and a load of the same index differently', () => {
+    // The two lists hold different sessions at index 3. One payload for both would let a stale tap
+    // open whatever now sits at that position in the other list.
+    expect(encodeCallback({ kind: 'openSession', index: 3 }))
+      .not.toBe(encodeCallback({ kind: 'loadHistory', index: 3 }));
+  });
+});
+
 describe('callback payloads', () => {
   const all: Callback[] = [
     { kind: 'refresh' },
     { kind: 'newMenu' },
     { kind: 'history' },
     { kind: 'openSession', index: 7 },
+    { kind: 'loadHistory', index: 7 },
     { kind: 'launch', index: 3, source: 'bob' },
     { kind: 'focus', sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
     { kind: 'transcript', sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
@@ -211,6 +222,8 @@ describe('callback payloads', () => {
   it('rejects malformed arguments rather than acting on index NaN', () => {
     expect(decodeCallback('rc|open|abc').kind).toBe('unknown');
     expect(decodeCallback('rc|open|-1').kind).toBe('unknown');
+    expect(decodeCallback('rc|load|abc').kind).toBe('unknown');
+    expect(decodeCallback('rc|load|-1').kind).toBe('unknown');
     expect(decodeCallback('rc|launch|0|gemini').kind).toBe('unknown');
     expect(decodeCallback('rc|launch|x|bob').kind).toBe('unknown');
     expect(decodeCallback('rc|focus|').kind).toBe('unknown');

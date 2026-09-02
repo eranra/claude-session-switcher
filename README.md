@@ -261,20 +261,25 @@ invisible. Keep rule decisions out of Telegram — while still recording them �
 
 ## Telegram remote control (optional)
 
-Your sessions as **topics** in a Telegram forum group. The thread you type in *is* the session you
-are talking to, so there is no mode to get wrong.
+Your **active** sessions as **topics** in a Telegram forum group. The thread you type in *is* the
+session you are talking to, so there is no mode to get wrong.
 
 ```
 GROUP "Session Sitter"  (Topics enabled)
 
-  # General                       ← the live list, /sessions /new /who /help
-  # 🟠 claude · sitter / sort order        2
-  # 🔄 bob · payments / refund flow
-  # ⚪ codex · scratch / spike
+  # General                            ← the active list, /sessions /history /new /who /help
+  # 🟠 sitter / sort order · claude              2
+  # 🔄 payments / refund flow · bob
+  # ⚪ scratch / spike · codex@laptop2
 ```
 
 Open a topic and you get that session's turns as they happen, its supervision cards, a **Full
 transcript** upload, **Focus in IDE**, and a text box that sends straight into the agent.
+
+The group holds the same sessions the **Sessions panel** does — one shared rule, so the two cannot
+disagree — and every name reads status, workspace, title, then the agent and the machine. A session
+that leaves the active list has its topic closed, keeping its scrollback. `/history` reaches the rest:
+tap a row to open its topic and bring the session back.
 
 Reading works for all four agents. Writing works for Bob — any task, live or historical — and for
 Claude sessions open in their own window. Codex and VS Code Chat expose no message API, so their

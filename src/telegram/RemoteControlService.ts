@@ -19,6 +19,14 @@
  * Each pass: refresh the lease, mirror owned sessions, take bus commands for owned sessions, and
  * (as reader) poll Telegram, route intents, and report results.
  *
+ * ## The group shows the active worklist, and only that
+ *
+ * Which sessions appear is not this file's decision — it asks the panel, through `deps.partition`,
+ * and mirrors the answer. That is deliberate: a fleet accumulates hundreds of past sessions, and a
+ * Telegram group holding a topic for each is unreadable. Sharing one rule with the panel is also
+ * what stops the two disagreeing about the same fleet, which is worse than either list being wrong,
+ * because then neither can be trusted. `/history` reaches everything else.
+ *
  * ## What it will not do
  *
  * It never sends a message to a session it cannot positively identify. A prompt delivered to the
@@ -44,10 +52,10 @@ import { classifyUpdate, decodeCallback, encodeCallback, type Intent } from './i
 import { ReaderLease, LEASE_RENEW_MS } from './lease';
 import { resolveOwner, resolveOwners, writeBlockedReason, type Ownership } from './ownership';
 import {
-  deservesTopic, planMirror, renderFleetList, renderHelp, renderTopicHeader, renderWho, topicName,
-  type ListEntry,
+  fleetSignature, planMirror, renderFleetList, renderHelp, renderHistoryList, renderTopicHeader,
+  renderWho, sessionLabel, topicName, type ListEntry,
 } from './render';
-import { TopicStore, topicsToClose, type TopicRecord } from './topics';
+import { TopicStore, topicsToClose, topicsToPrune, type TopicRecord } from './topics';
 import { routeUpdate } from './updateRouter';
 
 /** Seconds `getUpdates` waits before returning empty, so a tap arrives near-instantly. */
@@ -62,6 +70,15 @@ const ECHO_MEMORY = 5;
 export interface RemoteControlDeps {
   config: RemoteControlConfig;
   sessionManager: SessionManager;
+  /**
+   * The active worklist and History, exactly as the Sessions panel computes them.
+   *
+   * Injected rather than derived here so both surfaces apply one rule (`sessionActivity.ts`) to one
+   * set of live signals, and so the statuses shown in Telegram are the same *display* statuses the
+   * panel renders — a pending approval folded in, `finished` split by whether you have read it.
+   * Reading `SessionManager` directly instead would put every session that ever ran in the group.
+   */
+  partition: () => Promise<{ active: ClaudeSession[]; history: ClaudeSession[] }>;
   bobSender: MessageSender;
   claudeSender: TargetedClaudeSender;
   launcher: SessionLauncher;
@@ -89,6 +106,21 @@ export interface RemoteControlDeps {
   supervisionMessageIds?: () => Promise<ReadonlySet<string>>;
 }
 
+/**
+ * One pass's view of the fleet, passed down instead of five positional arguments.
+ *
+ * `active` and `history` are the panel's two lists; `all` is the flat lookup, because targeting a
+ * session by id has to work whichever list it is in — a topic opened from History still accepts
+ * text.
+ */
+interface FleetView {
+  active: ClaudeSession[];
+  history: ClaudeSession[];
+  all: ClaudeSession[];
+  owners: Map<string, Ownership>;
+  windows: WindowEntry[];
+}
+
 export class RemoteControlService {
   private readonly forum: ForumApi;
   private readonly topics: TopicStore;
@@ -106,8 +138,12 @@ export class RemoteControlService {
   private offset = 0;
   /** The General list message, so it is edited rather than reposted. */
   private listMessageId: number | undefined;
+  /** What the list last said, so it is only re-edited when the fleet actually changed. */
+  private lastListSignature: string | undefined;
   /** Sessions shown in the last rendered list, so a button index resolves back to a session. */
   private lastListed: ClaudeSession[] = [];
+  /** Sessions shown by the last `/history`, indexed separately so a stale tap cannot cross lists. */
+  private lastHistory: ClaudeSession[] = [];
   /** Workspaces offered by the last `/new` menu, indexed the same way. */
   private lastNewMenu: Array<{ workspace: string; pid: number }> = [];
   /** Text recently injected per session, so the mirror does not echo the user's own prompt. */
@@ -172,13 +208,16 @@ export class RemoteControlService {
     try {
       isReader = await this.lease.tryAcquire();
       const windows = await readLiveWindows({ homedir: this.deps.homedir });
-      const sessions = this.deps.sessionManager.getSessions();
-      const owners = resolveOwners(sessions, windows);
+      const { active, history } = await this.deps.partition();
+      const all = [...active, ...history];
+      const fleet: FleetView = {
+        active, history, all, owners: resolveOwners(all, windows), windows,
+      };
 
-      await this.mirrorOwnedSessions(sessions, owners);
-      await this.applyMyCommands(sessions, owners);
+      await this.mirrorOwnedSessions(active, fleet.owners);
+      await this.applyMyCommands(all, fleet.owners);
       if (isReader) {
-        await this.readerPass(sessions, owners, windows);
+        await this.readerPass(fleet);
       }
       await this.maybeSweep();
     } catch (err) {
@@ -193,20 +232,19 @@ export class RemoteControlService {
   // ------------------------------------------------------------------ mirroring (every window)
 
   /**
-   * Keep a topic for each session this window owns, and append its new turns.
+   * Keep a topic for each **active** session this window owns, and append its new turns.
    *
-   * Only *active* sessions get a topic created automatically — an idle history session gets one on
-   * demand, because auto-creating for everything would put weeks of history in the sidebar and make
-   * the group unusable.
+   * `active` is the panel's worklist, so the set of topics tracks the set of rows you would see in
+   * the sidebar. A history session gets a topic only when you ask for one through `/history`;
+   * auto-creating for everything is what filled the group with weeks of dead threads.
    */
   private async mirrorOwnedSessions(
-    sessions: ClaudeSession[], owners: Map<string, Ownership>,
+    active: ClaudeSession[], owners: Map<string, Ownership>,
   ): Promise<void> {
-    const mine = sessions.filter(s => owners.get(s.sessionId)?.pid === this.pid);
+    const mine = active.filter(s => owners.get(s.sessionId)?.pid === this.pid);
     for (const session of mine) {
       const existing = await this.topics.bySession(session.sessionId);
       if (existing === null) {
-        if (!deservesTopic(session.status)) { continue; } // quiet history: on demand only
         await this.createTopicFor(session, owners.get(session.sessionId));
         continue;
       }
@@ -249,6 +287,7 @@ export class RemoteControlService {
       mirroredTurns: (await this.turnsOf(session.sessionId)).length,
       closed: false,
       lastActivityAt: session.updatedAt.getTime(),
+      openedAt: this.now(),
       createdAt: this.now(),
     };
     await this.topics.save(record);
@@ -261,14 +300,16 @@ export class RemoteControlService {
     return record;
   }
 
-  /** Post new turns, rename on a status change, and reopen a topic whose session came back. */
+  /**
+   * Post new turns, rename on a status change, and reopen a topic whose session started talking.
+   *
+   * Only ever called for a session that is currently active, so being active cannot itself be the
+   * reason to reopen: a session open in a window stays active indefinitely, and reopening on that
+   * alone would fight `closeIdleTopics` — closed every quiet period, reopened on the next pass,
+   * forever. **New turns** are what earn a reopen, because they are the thing you would have missed.
+   */
   private async refreshTopic(session: ClaudeSession, record: TopicRecord): Promise<void> {
     let changed = false;
-
-    if (record.closed && deservesTopic(session.status)) {
-      const reopened = await this.forum.reopenTopic(record.threadId);
-      if (reopened.ok) { record.closed = false; changed = true; }
-    }
 
     const wanted = topicName(session);
     if (wanted !== record.name) {
@@ -278,6 +319,16 @@ export class RemoteControlService {
 
     const turns = await this.turnsOf(session.sessionId);
     const plan = planMirror(turns, record.mirroredTurns);
+    // Reopen before posting, not after: Telegram will not take a message into a closed topic, so
+    // posting first would drop the very turns that justified the reopen.
+    if (record.closed && plan.messages.length > 0) {
+      const reopened = await this.forum.reopenTopic(record.threadId);
+      if (reopened.ok) {
+        record.closed = false;
+        record.openedAt = this.now();
+        changed = true;
+      }
+    }
     const sentTexts = this.recentlySent.get(session.sessionId) ?? [];
     for (const message of plan.messages) {
       // Skip the echo of a prompt this window just injected — it is already visible as the user's
@@ -303,7 +354,45 @@ export class RemoteControlService {
     if (changed) { await this.topics.save(record); }
   }
 
-  /** Close topics whose sessions have been quiet. Closed, never deleted — scrollback survives. */
+  /**
+   * Close the topic of any session that has left the active worklist.
+   *
+   * This is what keeps the group's topic list equal to the panel's session list. Without it a topic
+   * created for a live session outlives it, and the sidebar grows by one dead thread per session
+   * that ever ran — the very thing that made the group unusable.
+   *
+   * Guarded on knowing *something*: a window whose session scan has not loaded yet reports an empty
+   * fleet, and acting on that would close every topic in the group. So an empty view is treated as
+   * "no information", never as "nothing is active".
+   */
+  private async pruneInactiveTopics(
+    active: ClaudeSession[], history: ClaudeSession[],
+  ): Promise<void> {
+    if (active.length === 0 && history.length === 0) { return; }
+    const activeIds = new Set(active.map(s => s.sessionId));
+    for (const record of topicsToPrune(await this.topics.all(), activeIds, this.now())) {
+      const closed = await this.forum.closeTopic(record.threadId);
+      if (closed.ok) {
+        record.closed = true;
+        await this.topics.save(record);
+        this.log(
+          `remote control: closed topic ${record.threadId} — `
+          + `${record.sessionId} is no longer active`);
+      }
+    }
+  }
+
+  /**
+   * Close topics whose sessions have been quiet, active or not.
+   *
+   * Distinct from `pruneInactiveTopics`, and both are needed. Pruning answers "does the panel still
+   * list this session?"; this answers "has anything happened in it lately?" — a session left open in
+   * a window is active for as long as the window lives, and its topic should still get out of the
+   * way once it goes quiet for `sessionSitter.telegram.idleTopicCloseHours`. It comes back the
+   * moment there is a new turn to post; see `refreshTopic`.
+   *
+   * Closed, never deleted — scrollback survives.
+   */
   private async closeIdleTopics(): Promise<void> {
     const all = await this.topics.all();
     const stale = topicsToClose(all, this.now(), idleCloseMs(this.deps.config));
@@ -361,12 +450,20 @@ export class RemoteControlService {
 
   // ------------------------------------------------------------------ reader only
 
-  private async readerPass(
-    sessions: ClaudeSession[], owners: Map<string, Ownership>, windows: WindowEntry[],
-  ): Promise<void> {
+  /**
+   * The reader's extra work.
+   *
+   * Pruning lives here rather than in the per-window mirror because the topic list is one shared
+   * thing, and the reader is already the window that owns the shared view — it renders the General
+   * list. Doing it in every window would be harmless (closing is idempotent) but would multiply the
+   * API calls by the number of windows for no gain.
+   */
+  private async readerPass(fleet: FleetView): Promise<void> {
+    await this.pruneInactiveTopics(fleet.active, fleet.history);
+    await this.refreshListIfChanged(fleet.active, fleet.owners);
     await this.reportResults();
     await this.reportUnroutable();
-    await this.pollUpdates(sessions, owners, windows);
+    await this.pollUpdates(fleet);
   }
 
   /** Post each finished command's outcome into the topic it came from. */
@@ -395,9 +492,7 @@ export class RemoteControlService {
     }
   }
 
-  private async pollUpdates(
-    sessions: ClaudeSession[], owners: Map<string, Ownership>, windows: WindowEntry[],
-  ): Promise<void> {
+  private async pollUpdates(fleet: FleetView): Promise<void> {
     let resp: Record<string, unknown>;
     try {
       resp = await this.deps.api('getUpdates', {
@@ -442,16 +537,11 @@ export class RemoteControlService {
         chatId: this.deps.config.chatId,
         allowedUserIds: this.deps.config.allowedUserIds,
       });
-      await this.handleIntent(intent, sessions, owners, windows);
+      await this.handleIntent(intent, fleet);
     }
   }
 
-  private async handleIntent(
-    intent: Intent,
-    sessions: ClaudeSession[],
-    owners: Map<string, Ownership>,
-    windows: WindowEntry[],
-  ): Promise<void> {
+  private async handleIntent(intent: Intent, fleet: FleetView): Promise<void> {
     switch (intent.kind) {
       case 'ignore':
         return;
@@ -470,19 +560,24 @@ export class RemoteControlService {
         return;
 
       case 'listSessions':
-        await this.renderList(sessions, owners);
+        await this.renderList(fleet.active, fleet.owners);
+        return;
+
+      case 'listHistory':
+        await this.renderHistory(fleet.history, fleet.owners);
         return;
 
       case 'who':
-        await this.forum.send(renderWho(this.entriesOf(sessions, owners), this.hostname), null);
+        await this.forum.send(
+          renderWho(this.entriesOf(fleet.active, fleet.owners), this.hostname), null);
         return;
 
       case 'newSessionMenu':
-        await this.sendNewMenu(windows);
+        await this.sendNewMenu(fleet.windows);
         return;
 
       case 'sendToTopic':
-        await this.routeTopicText(intent.threadId, intent.text, sessions, owners);
+        await this.routeTopicText(intent.threadId, intent.text, fleet.all, fleet.owners);
         return;
 
       case 'unroutableText':
@@ -494,7 +589,7 @@ export class RemoteControlService {
         return;
 
       case 'callback':
-        await this.handleCallback(intent, sessions, owners, windows);
+        await this.handleCallback(intent, fleet);
         return;
     }
   }
@@ -506,11 +601,14 @@ export class RemoteControlService {
     }));
   }
 
-  /** Render (or edit) the single General list message. */
+  /** Render (or edit) the single General list message. Active sessions only, as the panel shows. */
   private async renderList(
     sessions: ClaudeSession[], owners: Map<string, Ownership>,
   ): Promise<void> {
     this.lastListed = sessions.slice(0, 24); // button indexes address this snapshot
+    // Recorded here rather than by the caller, so an on-demand `/sessions` and an automatic refresh
+    // leave the same mark and neither re-edits what the other just drew.
+    this.lastListSignature = fleetSignature(this.entriesOf(sessions, owners));
     const body = renderFleetList(this.entriesOf(this.lastListed, owners), this.hostname, this.now());
     const markup = this.listButtons();
     if (this.listMessageId !== undefined) {
@@ -526,6 +624,30 @@ export class RemoteControlService {
     }
   }
 
+  /**
+   * Keep the pinned list honest without being asked.
+   *
+   * A session that leaves the worklist has to leave the list, not sit there until someone taps
+   * Refresh — a stale list is worse than no list, because it is believed. So the reader re-renders
+   * whenever the fleet changes.
+   *
+   * "Changes" deliberately excludes the ages in each row: those tick on every pass, and treating
+   * them as a change would mean editing a pinned message every few seconds and being rate limited
+   * for no information. What counts is which sessions there are, what state each is in, and whether
+   * it can be written to.
+   *
+   * Nothing is posted if the list has never been asked for. An unprompted message in General is not
+   * this feature's decision to make.
+   */
+  private async refreshListIfChanged(
+    active: ClaudeSession[], owners: Map<string, Ownership>,
+  ): Promise<void> {
+    if (this.listMessageId === undefined) { return; }
+    const signature = fleetSignature(this.entriesOf(active, owners));
+    if (signature === this.lastListSignature) { return; }
+    await this.renderList(active, owners);
+  }
+
   private listButtons(): ReplyMarkup {
     const rows = this.lastListed.slice(0, 8).map((session, index) => ([{
       text: `${session.projectName} / ${session.title}`.slice(0, 40),
@@ -534,8 +656,30 @@ export class RemoteControlService {
     rows.push([
       { text: '⟳ Refresh', callback_data: encodeCallback({ kind: 'refresh' }) },
       { text: '＋ New', callback_data: encodeCallback({ kind: 'newMenu' }) },
+      { text: '🗄 History', callback_data: encodeCallback({ kind: 'history' }) },
     ]);
     return { inline_keyboard: rows };
+  }
+
+  /**
+   * `/history` — the sessions the worklist does not show, each a button that brings one back.
+   *
+   * Posted fresh rather than edited in place like the General list: history is something you go and
+   * look at, not a board you watch, and a pinned second live message would compete with the first.
+   */
+  private async renderHistory(
+    sessions: ClaudeSession[], owners: Map<string, Ownership>,
+  ): Promise<void> {
+    this.lastHistory = sessions.slice(0, 8); // button indexes address this snapshot
+    const rows = this.lastHistory.map((session, index) => ([{
+      text: sessionLabel(session, 24).slice(0, 40),
+      callback_data: encodeCallback({ kind: 'loadHistory', index }),
+    }]));
+    rows.push([{ text: '⟳ Active sessions', callback_data: encodeCallback({ kind: 'refresh' }) }]);
+    await this.forum.send(
+      renderHistoryList(this.entriesOf(this.lastHistory, owners), this.now()),
+      null,
+      { inline_keyboard: rows });
   }
 
   private sessionButtons(session: ClaudeSession): ReplyMarkup {
@@ -546,6 +690,43 @@ export class RemoteControlService {
         { text: '👁 Focus in IDE', callback_data: encodeCallback({ kind: 'focus', sessionId: session.sessionId }) },
       ]],
     };
+  }
+
+  /**
+   * Open a session's topic, creating it when there is none. Returns the record, or null on failure.
+   *
+   * Only the owning window may create a topic, so the window that mirrors a session is the window
+   * that made its topic. A session no window owns gets one from the reader instead, read-only —
+   * better a thread you can read than a tap that appears to do nothing.
+   */
+  private async openTopicFor(
+    session: ClaudeSession, owner: Ownership | undefined, listCommand: string,
+  ): Promise<TopicRecord | null> {
+    const existing = await this.topics.bySession(session.sessionId);
+    if (existing !== null) {
+      if (existing.closed) {
+        const reopened = await this.forum.reopenTopic(existing.threadId);
+        if (reopened.ok) { existing.closed = false; }
+      }
+      // Stamped whether or not it was closed: you asked for this topic, so the pruner leaves it
+      // alone for a while even though its session is not in the worklist.
+      existing.openedAt = this.now();
+      await this.topics.save(existing);
+      await this.forum.send('Here.', existing.threadId);
+      return existing;
+    }
+    if (owner !== undefined && owner.pid !== null && owner.pid !== this.pid) {
+      await this.forum.send(
+        `That session belongs to the window with pid ${owner.pid}; its topic will appear shortly. `
+        + `Use ${listCommand} again if it does not.`,
+        null);
+      return null;
+    }
+    const created = await this.createTopicFor(session, owner);
+    if (created === null) {
+      await this.forum.send('Could not create a topic for that session.', null);
+    }
+    return created;
   }
 
   /**
@@ -623,30 +804,22 @@ export class RemoteControlService {
 
   private async handleCallback(
     intent: Extract<Intent, { kind: 'callback' }>,
-    sessions: ClaudeSession[],
-    owners: Map<string, Ownership>,
-    windows: WindowEntry[],
+    fleet: FleetView,
   ): Promise<void> {
     const cb = decodeCallback(intent.data);
     await this.forum.answerCallback(intent.callbackId, 'Working…');
     switch (cb.kind) {
       case 'refresh':
-        await this.renderList(sessions, owners);
+        await this.renderList(fleet.active, fleet.owners);
         return;
 
       case 'newMenu':
-        await this.sendNewMenu(windows);
+        await this.sendNewMenu(fleet.windows);
         return;
 
-      case 'history': {
-        const idle = sessions.filter(s => !deservesTopic(s.status)).slice(0, 20);
-        this.lastListed = idle;
-        await this.forum.send(
-          renderFleetList(this.entriesOf(idle, owners), this.hostname, this.now()),
-          null,
-          this.listButtons());
+      case 'history':
+        await this.renderHistory(fleet.history, fleet.owners);
         return;
-      }
 
       case 'openSession': {
         const session = this.lastListed[cb.index];
@@ -654,24 +827,36 @@ export class RemoteControlService {
           await this.forum.send('That list is out of date — use /sessions again.', null);
           return;
         }
-        const existing = await this.topics.bySession(session.sessionId);
-        if (existing !== null) {
-          if (existing.closed) { await this.forum.reopenTopic(existing.threadId); }
-          await this.forum.send('Here.', existing.threadId);
+        await this.openTopicFor(session, fleet.owners.get(session.sessionId), '/sessions');
+        return;
+      }
+
+      case 'loadHistory': {
+        const session = this.lastHistory[cb.index];
+        if (session === undefined) {
+          await this.forum.send('That list is out of date — use /history again.', null);
           return;
         }
-        const owner = owners.get(session.sessionId);
-        // Only its owner may create the topic, so the window that mirrors it is the window that
-        // made it. A session with no owner gets one from the reader, read-only.
-        if (owner?.pid === this.pid || owner?.pid === null || owner === undefined) {
-          const created = await this.createTopicFor(session, owner);
-          if (created === null) {
-            await this.forum.send('Could not create a topic for that session.', null);
-          }
+        const owner = fleet.owners.get(session.sessionId);
+        const record = await this.openTopicFor(session, owner, '/history');
+        // Opening the topic gives you the session to read. Focusing it in the IDE is what actually
+        // brings it back into the active list, because "active" means a window has it open — so the
+        // panel and this list agree about it again from the next pass onward.
+        if (record !== null && owner !== undefined && owner.pid !== null) {
+          await postCommand({
+            cmdId: newCommandId(),
+            kind: 'focus',
+            sessionId: session.sessionId,
+            source: session.source,
+            text: '',
+            threadId: record.threadId,
+            issuedAt: this.now(),
+          }, this.deps.homedir);
         } else {
           await this.forum.send(
-            `That session belongs to the window with pid ${owner.pid}; its topic will appear shortly.`,
-            null);
+            'No window on this machine owns that session, so it cannot be reopened in an IDE. '
+            + 'You can still read it here.',
+            record?.threadId ?? null);
         }
         return;
       }
@@ -696,7 +881,7 @@ export class RemoteControlService {
       }
 
       case 'focus': {
-        const session = sessions.find(s => s.sessionId === cb.sessionId);
+        const session = fleet.all.find(s => s.sessionId === cb.sessionId);
         if (session === undefined) { return; }
         const record = await this.topics.bySession(cb.sessionId);
         await postCommand({

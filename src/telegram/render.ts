@@ -22,7 +22,7 @@
 
 import type { ClaudeSession } from '../SessionManager';
 import type { MessageExchange } from '../SessionManager';
-import { isWorklistSignal, needsYou, type SessionStatus } from '../sessionStatus';
+import { needsYou, type SessionStatus } from '../sessionStatus';
 import type { Ownership } from './ownership';
 
 /** Telegram's message body limit. */
@@ -33,15 +33,25 @@ export const MAX_TOPIC_NAME_CHARS = 128;
 export const MAX_TURNS_PER_PASS = 4;
 
 /**
- * One glyph per status, carrying the same meaning as the panel's shapes.
+ * One glyph per status, matched as closely to the panel's marker as characters allow.
  *
- * Telegram has no shapes, only text, so the panel's amber/green/grey language is what carries over
- * — see `docs/STATUS-INDICATORS.md`, which these must agree with. Amber means your turn, green
- * means the agent's, grey means nothing is happening.
+ * Telegram renders no shapes, only text, so what carries over from `docs/STATUS-INDICATORS.md` is
+ * the colour language and the silhouette. Amber means your turn, green means the agent's, grey
+ * means nothing is happening:
+ *
+ * | Status     | Panel marker          | Here | Why this character                                |
+ * |------------|-----------------------|------|---------------------------------------------------|
+ * | `approval` | solid amber triangle  | 🟠   | Amber and filled — the most solid thing in a list |
+ * | `question` | amber question mark   | ❓   | The one symbol that needs no learning             |
+ * | `finished` | green dot in a ring   | 🟢   | Green and filled — a result waiting to be read    |
+ * | `working`  | spinning green ring   | 🔄   | The only glyph in the set that reads as motion    |
+ * | `seen`     | small flat grey dot   | ⚫   | Filled and quiet — present, asking for nothing    |
+ * | `dormant`  | hollow grey circle    | ⚪   | Hollow, so it is a different shape from `seen`    |
  *
  * The icon leads every row and every topic name, so it is the first thing read in a list of twenty:
  * `approval` and `question` have to be distinguishable from each other at a glance, because one
- * needs a tap and the other needs typing.
+ * needs a tap and the other needs typing. The whole set is pinned by a test, so changing one is a
+ * deliberate act rather than a silent drift away from the panel.
  */
 const STATUS_ICON: Record<SessionStatus, string> = {
   approval: '🟠',
@@ -64,14 +74,20 @@ export function statusIcon(status: SessionStatus): string {
 }
 
 /**
- * Whether a session is live enough to be given a topic without being asked for.
+ * How a session is named wherever it is named: `workspace / title · agent[@host]`.
  *
- * Anything that needs you (`approval`, `question`, `finished`) or is running (`working`). The three
- * quiet states get a topic only on demand: auto-creating one per historical session would put weeks
- * of them in the group's topic list and make it unusable.
+ * The order is not cosmetic. The workspace answers "which piece of work is this?", which is the
+ * question actually being asked when twenty rows go past — so it comes first, and it is never the
+ * part that gets truncated. The title distinguishes two sessions in that workspace. Which agent it
+ * is, and which machine it runs on, are worth knowing but never worth reading first, so they trail.
+ *
+ * The host is shown only for a peer session: on this machine it would be noise on every row.
  */
-export function deservesTopic(status: SessionStatus): boolean {
-  return needsYou(status) || isWorklistSignal(status);
+export function sessionLabel(session: ClaudeSession, titleChars: number): string {
+  const agent = session.peer
+    ? `${SOURCE_LABEL[session.source]}@${session.peer}`
+    : SOURCE_LABEL[session.source];
+  return `${session.projectName} / ${truncate(session.title, titleChars)} · ${agent}`;
 }
 
 /** Cut `text` to `max` characters on a word boundary where one is close enough to the end. */
@@ -96,18 +112,26 @@ export function relativeAge(updatedAt: Date, now: number): string {
 }
 
 /**
- * The name of a session's topic: `🟡 claude · workspace / title`.
+ * The name of a session's topic: `🟠 workspace / title · claude`.
  *
- * The status icon leads so the topic list doubles as a status board — Telegram shows topic names
- * in a sidebar, and an icon there is the cheapest possible "what needs me" signal. The title is
- * truncated rather than the workspace, because two topics from the same workspace still need to be
- * told apart by title.
+ * The status icon leads so the topic list doubles as a status board — Telegram shows topic names in
+ * a sidebar, and an icon there is the cheapest possible "what needs me" signal. Everything after it
+ * follows `sessionLabel`: workspace, title, then the agent and the machine.
+ *
+ * The title is what gets truncated, never the workspace, because two topics from the same workspace
+ * still have to be told apart by title.
  */
 export function topicName(session: ClaudeSession): string {
-  const prefix = `${statusIcon(session.status)} ${SOURCE_LABEL[session.source]} · ${session.projectName} / `;
-  const room = MAX_TOPIC_NAME_CHARS - prefix.length;
-  if (room < 8) { return truncate(prefix.replace(/ \/ $/, ''), MAX_TOPIC_NAME_CHARS); }
-  return `${prefix}${truncate(session.title, room)}`;
+  const icon = `${statusIcon(session.status)} `;
+  // What the name costs before a single character of title: the icon, the workspace, the separators
+  // and the agent. Measured rather than guessed, so a long workspace or an `agent@host` cannot push
+  // the result past Telegram's limit.
+  const overhead = icon.length + sessionLabel({ ...session, title: '' }, 0).length;
+  const room = MAX_TOPIC_NAME_CHARS - overhead;
+  if (room < 8) {
+    return truncate(`${icon}${session.projectName}`, MAX_TOPIC_NAME_CHARS);
+  }
+  return truncate(`${icon}${sessionLabel(session, room)}`, MAX_TOPIC_NAME_CHARS);
 }
 
 export interface ListEntry {
@@ -115,13 +139,35 @@ export interface ListEntry {
   owner: Ownership;
 }
 
+/** Sort rows by workspace, then title. Never by time — see `renderFleetList`. */
+function byWorkspaceThenTitle(a: ListEntry, b: ListEntry): number {
+  const ws = a.session.projectName.localeCompare(b.session.projectName);
+  return ws !== 0 ? ws : a.session.title.localeCompare(b.session.title);
+}
+
+/** One list row: `🟠 workspace / title · claude · 2m · read-only`. */
+function listRow(entry: ListEntry, now: number): string {
+  const { session, owner } = entry;
+  const readOnly = owner.pid === null ? ' · read-only' : '';
+  return `${statusIcon(session.status)} ${sessionLabel(session, 40)}`
+    + ` · ${relativeAge(session.updatedAt, now)}${readOnly}`;
+}
+
 /**
- * The General topic's one live message: every session this machine can see, grouped by host.
+ * The General topic's one live message: the **active** sessions, exactly the panel's worklist.
  *
- * Grouped by host rather than sorted by time, because this message is *edited in place* — a
- * time-ordered list would reshuffle on every poll and be impossible to read. Rows only move when a
- * session appears or disappears. That is the same reasoning behind the panel's `hostWorkspace`
- * sort order.
+ * Active-only, not everything the machine can see. A fleet accumulates hundreds of past sessions,
+ * and a list of hundreds answers no question — you cannot find the one that needs you in it. The
+ * rule for what counts as active is `sessionActivity.ts`, shared with the panel, so this list and
+ * the panel's cannot disagree. Everything else is behind `/history`.
+ *
+ * Sorted by workspace and then title, **never** by time, because this message is *edited in place*:
+ * a time ordering would reshuffle every row on every poll and be impossible to read. A row moves
+ * only when a session appears, disappears, or changes status.
+ *
+ * The host is not a heading here. It used to group the list, which put the machine name above the
+ * workspace — and the machine is the last thing you need when you are looking for a piece of work.
+ * It now trails inside each row, and only for a session on another machine.
  */
 export function renderFleetList(
   entries: ListEntry[], hostname: string, now: number,
@@ -132,40 +178,55 @@ export function renderFleetList(
   const running = entries.filter(e => e.session.status === 'working').length;
 
   const header = `Session Sitter · ${hostname}`;
-  const counts = `${yours} need you · ${running} working · ${entries.length} total`;
+  const counts = `${yours} need you · ${running} working · ${entries.length} active`;
   if (entries.length === 0) {
-    return `${header}\n${counts}\n\nNo sessions found.`;
+    return `${header}\n${counts}\n\nNo active sessions. /history shows the earlier ones.`;
   }
 
-  // Group by host: this machine first, then peers alphabetically.
-  const groups = new Map<string, ListEntry[]>();
+  const lines = [header, counts, ''];
+  for (const entry of entries.slice().sort(byWorkspaceThenTitle)) {
+    lines.push(`  ${listRow(entry, now)}`);
+  }
+  return truncate2(lines.join('\n'));
+}
+
+/**
+ * A fingerprint of what the list says, ignoring anything that changes on its own.
+ *
+ * The pinned General message is edited in place, and Telegram rate-limits edits. Ages ("2m") tick
+ * every pass, so treating the rendered body as the comparison would mean an edit every few seconds
+ * carrying no new information. What actually matters is which sessions exist, what state each is in,
+ * and whether it can be written to — so that, and only that, is what the fingerprint covers.
+ *
+ * Sorted, because the caller may hand these over in any order and a reordering is not a change.
+ */
+export function fleetSignature(entries: ListEntry[]): string {
+  return entries
+    .map(e => `${e.session.sessionId}:${e.session.status}:${e.owner.pid ?? 'none'}`)
+    .sort()
+    .join('|');
+}
+
+/**
+ * `/history` — the sessions the worklist does not show, newest first.
+ *
+ * Newest first, unlike the active list, and for the opposite reason: this message is posted fresh
+ * each time rather than edited in place, so nothing reshuffles under you, and "what was I last
+ * working on?" is the actual question a history list is asked.
+ */
+export function renderHistoryList(
+  entries: ListEntry[], now: number,
+): string {
+  if (entries.length === 0) {
+    return 'No earlier sessions — everything this machine can see is already in the active list.';
+  }
+  const lines = [
+    `History · ${entries.length} session${entries.length === 1 ? '' : 's'}`,
+    'Tap one to open its topic and bring it back into the active list.',
+    '',
+  ];
   for (const entry of entries) {
-    const host = entry.session.peer ?? hostname;
-    const list = groups.get(host) ?? [];
-    list.push(entry);
-    groups.set(host, list);
-  }
-  const hosts = [...groups.keys()].sort((a, b) => {
-    if (a === hostname) { return -1; }
-    if (b === hostname) { return 1; }
-    return a.localeCompare(b);
-  });
-
-  const lines: string[] = [header, counts];
-  for (const host of hosts) {
-    lines.push('', host === hostname ? `${host} (this machine)` : host);
-    const rows = (groups.get(host) ?? []).slice().sort((a, b) => {
-      const ws = a.session.projectName.localeCompare(b.session.projectName);
-      return ws !== 0 ? ws : a.session.title.localeCompare(b.session.title);
-    });
-    for (const { session, owner } of rows) {
-      const readOnly = owner.pid === null ? ' · read-only' : '';
-      lines.push(
-        `  ${statusIcon(session.status)} ${SOURCE_LABEL[session.source]} · `
-        + `${session.projectName} / ${truncate(session.title, 40)}`
-        + `  ${relativeAge(session.updatedAt, now)}${readOnly}`,
-      );
-    }
+    lines.push(`  ${listRow(entry, now)}`);
   }
   return truncate2(lines.join('\n'));
 }
@@ -182,16 +243,22 @@ export function truncate2(body: string): string {
   return `${body.slice(0, keep)}\n… truncated`;
 }
 
-/** The message posted when a topic is created: what this session is, and what can be done to it. */
+/**
+ * The message posted when a topic is created: what this session is, and what can be done to it.
+ *
+ * Same reading order as every other surface — workspace, then title, then the agent and the machine
+ * — so the header confirms what the topic name already said instead of restating it differently.
+ */
 export function renderTopicHeader(
   session: ClaudeSession, owner: Ownership, blockedReason: string | null,
 ): string {
   const lines = [
-    `${statusIcon(session.status)} ${SOURCE_LABEL[session.source]} · ${session.projectName}`,
+    `${statusIcon(session.status)} ${session.projectName}`,
     session.title,
     '',
-    `path: ${session.projectPath}`,
+    `agent: ${SOURCE_LABEL[session.source]}`,
     `host: ${session.peer ?? 'this machine'}`,
+    `path: ${session.projectPath}`,
     `session: ${session.sessionId}`,
   ];
   if (owner.pid !== null) {
@@ -264,10 +331,14 @@ export function renderHelp(): string {
     'Session Sitter — remote control',
     '',
     'In this topic (General):',
-    '  /sessions   refresh the session list',
+    '  /sessions   refresh the list of active sessions',
+    '  /history    the earlier ones — tap to bring one back',
     '  /new        start a session in a workspace on this machine',
     '  /who        show which window owns what',
     '  /help       this message',
+    '',
+    'The list holds the active sessions only, the same ones the Sessions panel shows.',
+    'A session that leaves that list has its topic closed; its scrollback is kept.',
     '',
     'In a session topic:',
     '  type anything   sent to that session as a user message',
@@ -286,7 +357,7 @@ export function renderWho(entries: ListEntry[], hostname: string): string {
     const who = owner.pid === null
       ? 'nobody — read-only'
       : `pid ${owner.pid} · ${owner.basis === 'holds' ? 'has it open' : 'owns workspace'}`;
-    lines.push(`${statusIcon(session.status)} ${session.projectName} / ${truncate(session.title, 30)} → ${who}`);
+    lines.push(`${statusIcon(session.status)} ${sessionLabel(session, 30)} → ${who}`);
   }
   return truncate2(lines.join('\n'));
 }

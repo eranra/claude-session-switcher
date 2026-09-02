@@ -6,18 +6,20 @@ import {
   isEchoOfSent,
   planMirror,
   relativeAge,
+  fleetSignature,
   renderFleetList,
   renderHelp,
+  renderHistoryList,
   renderTopicHeader,
   renderWho,
+  sessionLabel,
   statusIcon,
   topicName,
   truncate,
   truncate2,
 } from '../../telegram/render';
 import type { ClaudeSession, MessageExchange } from '../../SessionManager';
-import { SESSION_STATUSES } from '../../sessionStatus';
-import { deservesTopic } from '../../telegram/render';
+import { SESSION_STATUSES, type SessionStatus } from '../../sessionStatus';
 import type { Ownership } from '../../telegram/ownership';
 
 const NOW = new Date('2026-09-01T12:00:00Z').getTime();
@@ -52,20 +54,41 @@ describe('statusIcon', () => {
     const icons = new Set(SESSION_STATUSES.map(statusIcon));
     expect(icons.size).toBe(SESSION_STATUSES.length);
   });
+
+  it('keeps the panel\u2019s colour language, glyph for glyph', () => {
+    // Pinned so a change is a deliberate act rather than a drift away from the panel: the whole
+    // point of the icon is that amber means your turn wherever you read it. The table in
+    // `render.ts` and `docs/STATUS-INDICATORS.md` describe this same mapping.
+    const expected: Record<SessionStatus, string> = {
+      approval: '\u{1F7E0}',
+      question: '\u2753',
+      finished: '\u{1F7E2}',
+      working: '\u{1F504}',
+      seen: '\u26AB',
+      dormant: '\u26AA',
+    };
+    for (const status of SESSION_STATUSES) {
+      expect(statusIcon(status), status).toBe(expected[status]);
+    }
+  });
 });
 
-describe('deservesTopic', () => {
-  it('gives a topic to anything that needs you or is running', () => {
-    expect(deservesTopic('approval')).toBe(true);
-    expect(deservesTopic('question')).toBe(true);
-    expect(deservesTopic('finished')).toBe(true);
-    expect(deservesTopic('working')).toBe(true);
+describe('sessionLabel', () => {
+  it('leads with the workspace, then the title, then the agent', () => {
+    // The workspace answers "which piece of work is this?", which is the question a list of twenty
+    // rows is actually asked. The agent is worth knowing and never worth reading first.
+    expect(sessionLabel(session(), 40)).toBe('app / fix the sort order \u00b7 claude');
   });
 
-  it('leaves the quiet states for on demand', () => {
-    // Auto-creating a topic per historical session would put weeks of them in the sidebar.
-    expect(deservesTopic('seen')).toBe(false);
-    expect(deservesTopic('dormant')).toBe(false);
+  it('names the machine only for a session on another one', () => {
+    expect(sessionLabel(session({ peer: 'me@laptop2' }), 40)).toContain('claude@me@laptop2');
+    expect(sessionLabel(session(), 40)).not.toContain('@');
+  });
+
+  it('truncates the title and never the workspace', () => {
+    const label = sessionLabel(session({ title: 'z'.repeat(200) }), 10);
+    expect(label.startsWith('app / ')).toBe(true);
+    expect(label.endsWith('\u00b7 claude')).toBe(true);
   });
 });
 
@@ -109,8 +132,8 @@ describe('relativeAge', () => {
 });
 
 describe('topicName', () => {
-  it('leads with the status icon so the topic list doubles as a status board', () => {
-    expect(topicName(session())).toBe('🟠 claude · app / fix the sort order');
+  it('leads with the status icon, then workspace, title and agent', () => {
+    expect(topicName(session())).toBe('🟠 app / fix the sort order · claude');
   });
 
   it('stays inside the Telegram topic name limit', () => {
@@ -132,7 +155,11 @@ describe('topicName', () => {
 
 describe('renderFleetList', () => {
   it('says so plainly when there is nothing to show', () => {
-    expect(renderFleetList([], 'desktop', NOW)).toContain('No sessions found.');
+    expect(renderFleetList([], 'desktop', NOW)).toContain('No active sessions.');
+  });
+
+  it('says which list holds the rest when it is empty', () => {
+    expect(renderFleetList([], 'desktop', NOW)).toContain('/history');
   });
 
   it('counts by what each session asks of you, not by state name', () => {
@@ -144,15 +171,22 @@ describe('renderFleetList', () => {
       { session: session({ sessionId: 'c', status: 'working' }), owner: owned },
       { session: session({ sessionId: 'd', status: 'dormant' }), owner: owned },
     ], 'desktop', NOW);
-    expect(body).toContain('2 need you · 1 working · 4 total');
+    expect(body).toContain('2 need you · 1 working · 4 active');
   });
 
-  it('puts this machine first and marks it', () => {
+  it('names a peer machine in the row, after the agent, not as a heading', () => {
+    // The host used to group the list, which put the machine name above the workspace. The machine
+    // is the last thing you need when you are looking for a piece of work.
     const body = renderFleetList([
       { session: session({ sessionId: 'a', peer: 'me@laptop2' }), owner: unowned },
-      { session: session({ sessionId: 'b' }), owner: owned },
     ], 'desktop', NOW);
-    expect(body.indexOf('desktop (this machine)')).toBeLessThan(body.indexOf('me@laptop2'));
+    expect(body).toContain('app / fix the sort order · claude@me@laptop2');
+    expect(body).not.toContain('(this machine)');
+  });
+
+  it('does not name this machine on every row', () => {
+    const body = renderFleetList([{ session: session(), owner: owned }], 'desktop', NOW);
+    expect(body.split('\n').filter(l => l.includes('desktop'))).toHaveLength(1);
   });
 
   it('orders rows by workspace and title, not by time', () => {
@@ -184,6 +218,72 @@ describe('renderFleetList', () => {
   });
 });
 
+describe('fleetSignature', () => {
+  it('ignores the passage of time, which every row shows and nothing can stop', () => {
+    // The pinned list is edited in place and Telegram rate-limits edits. If a ticking age counted
+    // as a change, the message would be re-edited every few seconds carrying no new information.
+    const a = [{ session: session({ updatedAt: new Date(NOW - 1_000) }), owner: owned }];
+    const b = [{ session: session({ updatedAt: new Date(NOW - 9 * 3600_000) }), owner: owned }];
+    expect(fleetSignature(a)).toBe(fleetSignature(b));
+  });
+
+  it('changes when a session changes state', () => {
+    const before = [{ session: session({ status: 'working' }), owner: owned }];
+    const after = [{ session: session({ status: 'approval' }), owner: owned }];
+    expect(fleetSignature(before)).not.toBe(fleetSignature(after));
+  });
+
+  it('changes when a session appears or disappears', () => {
+    const one = [{ session: session({ sessionId: 'a' }), owner: owned }];
+    const two = [...one, { session: session({ sessionId: 'b' }), owner: owned }];
+    expect(fleetSignature(one)).not.toBe(fleetSignature(two));
+  });
+
+  it('changes when a session becomes writable', () => {
+    // read-only is on the row, so gaining an owner has to redraw it.
+    const before = [{ session: session(), owner: unowned }];
+    const after = [{ session: session(), owner: owned }];
+    expect(fleetSignature(before)).not.toBe(fleetSignature(after));
+  });
+
+  it('treats a reordering as no change', () => {
+    const a = { session: session({ sessionId: 'a' }), owner: owned };
+    const b = { session: session({ sessionId: 'b' }), owner: owned };
+    expect(fleetSignature([a, b])).toBe(fleetSignature([b, a]));
+  });
+
+  it('is empty for an empty fleet', () => {
+    expect(fleetSignature([])).toBe('');
+  });
+});
+
+describe('renderHistoryList', () => {
+  it('says plainly when the worklist already holds everything', () => {
+    expect(renderHistoryList([], NOW)).toContain('already in the active list');
+  });
+
+  it('keeps the order it is given, so it can be newest first', () => {
+    const body = renderHistoryList([
+      { session: session({ sessionId: 'a', projectName: 'zeta' }), owner: owned },
+      { session: session({ sessionId: 'b', projectName: 'alpha' }), owner: owned },
+    ], NOW);
+    expect(body.indexOf('zeta')).toBeLessThan(body.indexOf('alpha'));
+  });
+
+  it('says what tapping a row does', () => {
+    const body = renderHistoryList([{ session: session(), owner: owned }], NOW);
+    expect(body).toContain('active list');
+  });
+
+  it('stays inside the Telegram message limit', () => {
+    const many = Array.from({ length: 300 }, (_, i) => ({
+      session: session({ sessionId: `s${i}`, title: `a rather long session title ${i}` }),
+      owner: owned,
+    }));
+    expect(renderHistoryList(many, NOW).length).toBeLessThanOrEqual(MAX_MESSAGE_CHARS);
+  });
+});
+
 describe('truncate2', () => {
   it('leaves a short body untouched, newlines included', () => {
     expect(truncate2('a\nb')).toBe('a\nb');
@@ -197,6 +297,13 @@ describe('truncate2', () => {
 });
 
 describe('renderTopicHeader', () => {
+  it('reads workspace, title, agent, host — the same order as everywhere else', () => {
+    const body = renderTopicHeader(session(), owned, null);
+    expect(body.indexOf('app')).toBeLessThan(body.indexOf('fix the sort order'));
+    expect(body.indexOf('fix the sort order')).toBeLessThan(body.indexOf('agent: claude'));
+    expect(body.indexOf('agent: claude')).toBeLessThan(body.indexOf('host:'));
+  });
+
   it('tells the user they can type when the session is writable', () => {
     const body = renderTopicHeader(session(), owned, null);
     expect(body).toContain('Type here');
@@ -291,6 +398,12 @@ describe('renderHelp and renderWho', () => {
     const help = renderHelp();
     expect(help).toContain('Codex and Chat expose no message API');
     expect(help).toContain('/sessions');
+  });
+
+  it('help names /history and says what the list holds', () => {
+    const help = renderHelp();
+    expect(help).toContain('/history');
+    expect(help).toContain('active sessions only');
   });
 
   it('who explains an unowned session instead of leaving it unexplained', () => {

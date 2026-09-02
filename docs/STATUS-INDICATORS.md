@@ -12,14 +12,19 @@ the bug.
 
 ## The six states
 
-| Marker | State | Means | Your move |
-|:---:|---|---|---|
-| spinning green ring | `working` | Running a tool, or writing a reply | Nothing — it is busy |
-| solid amber arrow | `approval` | Paused on a permission prompt | Approve or reject it |
-| amber question mark | `question` | Asked you something | Answer it |
-| green dot in a ring | `finished` | Done, and you have not opened it since | Read the result |
-| small grey dot | `seen` | Done, and you have read it | Nothing |
-| hollow grey circle | `dormant` | Nothing happening, or no signal to tell | Nothing |
+| Marker | In Telegram | State | Means | Your move |
+|:---:|:---:|---|---|---|
+| spinning green ring | 🔄 | `working` | Running a tool, or writing a reply | Nothing — it is busy |
+| solid amber arrow | 🟠 | `approval` | Paused on a permission prompt | Approve or reject it |
+| amber question mark | ❓ | `question` | Asked you something | Answer it |
+| green dot in a ring | 🟢 | `finished` | Done, and you have not opened it since | Read the result |
+| small grey dot | ⚫ | `seen` | Done, and you have read it | Nothing |
+| hollow grey circle | ⚪ | `dormant` | Nothing happening, or no signal to tell | Nothing |
+
+The Telegram column is the same state in the one medium that has no shapes, only characters — see
+[`TELEGRAM.md`](TELEGRAM.md). The colour language survives the move, which is what matters: amber is
+your turn wherever you read it. The glyph set is pinned by a test in `src/test/telegram/render.test.ts`,
+so it cannot drift away from this table by accident.
 
 They answer one question — **whose turn is it, and why** — and they are ordered above the way
 urgency runs. Pick **Needs you first** from the sort menu (**⇅**) and the list is sorted in exactly
