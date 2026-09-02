@@ -161,3 +161,52 @@ describe('webview: the six status markers', () => {
     expect(dormant.slice(0, dormant.indexOf('}'))).toMatch(/border\s*:/);
   });
 });
+
+// ── The spinner has to survive being rebuilt ─────────────────────────────────
+//
+// `renderTabs()` clears the strip and recreates every row on every push, and a brand-new element
+// starts its CSS animation at 0deg. The rows are pushed whenever `sessionsFingerprint` moves, which
+// during a streaming session means every 250ms watcher debounce — Claude writes the transcript far
+// faster than that. So the one state that animates is also the one rebuilt several times a second,
+// and the ring was snapping back to 0 before it had turned a quarter. It reads as a ring that
+// twitches in place rather than one that turns.
+//
+// The fix anchors the animation's phase to the wall clock with a negative `animation-delay`, so a
+// fresh element picks up where the one it replaced left off. That only works while the delay and the
+// CSS duration agree about the period, which is what these tests pin.
+describe('webview: the working spinner is phase-anchored to the clock', () => {
+  const dir = path.join(__dirname, '..', 'webview');
+  const main = fs.readFileSync(path.join(dir, 'main.js'), 'utf8');
+  const css = fs.readFileSync(path.join(dir, 'styles.css'), 'utf8');
+
+  /** The declared period of `.status-working`'s animation, in ms. */
+  function cssSpinPeriodMs(): number {
+    const block = css.slice(css.indexOf('.status-working'));
+    const decl = block.slice(0, block.indexOf('}'));
+    const match = /animation\s*:\s*spin\s+([\d.]+)(m?s)/.exec(decl);
+    if (!match) { throw new Error('.status-working declares no spin animation'); }
+    return match[2] === 'ms' ? Number(match[1]) : Number(match[1]) * 1000;
+  }
+
+  it('sets a negative animation-delay on the working marker', () => {
+    const fn = main.slice(main.indexOf('function buildStatusIndicator'));
+    const body = fn.slice(0, fn.indexOf('\n  }'));
+    // Negative, because that is what starts an animation mid-cycle rather than delaying it.
+    expect(body).toMatch(/animationDelay\s*=\s*['"`]-/);
+  });
+
+  it('divides by the same period the stylesheet declares', () => {
+    const declared = /SPIN_PERIOD_MS\s*=\s*(\d+)/.exec(main);
+    expect(declared, 'main.js must name the spin period as SPIN_PERIOD_MS').not.toBeNull();
+    // A mismatch is invisible in review and shows up only as a spinner that jumps on every push.
+    expect(Number(declared![1])).toBe(cssSpinPeriodMs());
+  });
+
+  it('anchors only the state that animates', () => {
+    // Every other marker is static by design — `approval` especially, where motion would say
+    // "busy, leave it alone" about the one row that is waiting on you.
+    const fn = main.slice(main.indexOf('function buildStatusIndicator'));
+    const body = fn.slice(0, fn.indexOf('\n  }'));
+    expect(body).toMatch(/status\s*===\s*'working'/);
+  });
+});

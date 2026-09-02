@@ -5,6 +5,42 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.3 — Give the panel a clock, and a spinner that survives a repaint
+
+**A bound is not a bound if nothing checks it.** Every age rule the panel applies is measured against
+`Date.now()` at the moment `_partitionSessions` runs: the 2h `working` fallback and the probeless
+recency window in `isActiveSession`, the 24h finished→dormant split in `resolveDisplayStatus`, and the
+pruning of a dead window's session ids by `readLiveWindows`. But that only runs when the webview
+repaints, and every repaint trigger was a *change* signal. The one that matters is gated —
+`onDidChangeSessions` fires only when `sessionsFingerprint` moves, and a fingerprint stops moving for
+good once a session's raw status settles on a transcript nobody will write to again.
+
+So the panel could not see time pass. A row that should have aged out hours ago kept whatever verdict
+the panel last reached, until something unrelated happened in the fleet and the whole list corrected
+itself at once. That is how it was found: a day-old session sat at the top of the worklist until a new
+session was started in another workspace, at which point the list silently fixed itself. The 60-second
+`_registryTimer` was no help — it publishes this window's registry entry and never repaints anything.
+`PANEL_REPAINT_MS` now ticks every 15 seconds while the view is visible, skipping hidden panels
+because each tick costs two inspector round-trips into other extension hosts. Not a regression: the
+same gap is in 0.8.0.
+
+**The `working` spinner was being restarted faster than it could turn.** `renderTabs()` clears the
+strip and rebuilds every row on every push, and a brand-new element starts its CSS animation at 0°.
+Pushes follow the fingerprint, which for a streaming session means every 250ms watcher debounce —
+Claude writes its transcript far faster than that, as the comment on `STREAMING_WINDOW_MS` already
+says. So the one state that animates was also the one rebuilt several times a second, and the ring
+snapped back to 0 before it had turned a quarter. It read as a ring twitching in place.
+
+The marker's phase is now anchored to the wall clock with a negative `animation-delay`, so each new
+element picks up where the one it replaced left off. `SPIN_PERIOD_MS` in `main.js` and the duration in
+`styles.css` have to agree for that to work, and a test pins them together — a mismatch is invisible
+in review and shows up only as a marker that jumps. Nothing changes under `prefers-reduced-motion`:
+there is no animation left to offset.
+
+The underlying waste — tearing down the whole strip several times a second, which also drops hover
+state and the row preview — is untouched. Reconciling rows by session id is the fix, and it is its own
+change.
+
 ### 0.8.2 — Stop a dead session sitting at the top of the worklist
 
 A session killed mid-tool-call was pinned as `approval` **forever**. The two blocked states are the

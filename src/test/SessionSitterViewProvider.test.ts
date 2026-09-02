@@ -1330,3 +1330,101 @@ describe('session order and workspace colours', () => {
     expect(postMessage.mock.calls.length).toBe(after);
   });
 });
+
+// ── Tests: the panel's own clock ──────────────────────────────────────────────
+//
+// Every age bound the panel applies — the 2h `working` fallback, the 24h finished→dormant split,
+// the probeless recency window, and the pruning of a dead window's ids by `readLiveWindows` — is
+// evaluated against `Date.now()` inside `_partitionSessions`. That only runs when the webview
+// repaints, and every other repaint trigger is a CHANGE signal: `onDidChangeSessions` is gated on
+// `sessionsFingerprint`, which stops moving the moment a session's raw status settles. So without a
+// clock of its own the panel shows whatever verdict it last reached, for as long as nothing else in
+// the fleet happens — which is how a day-old row sits in the worklist until you start a session
+// somewhere else and the list silently corrects itself.
+describe("the panel's own clock", () => {
+  function resolveWebviewCapturing(
+    provider: SessionSitterViewProvider, visible = true,
+  ) {
+    const postMessage = vi.fn();
+    const webview = {
+      options: {}, html: '', postMessage,
+      // Returns a real disposable: this block calls `dispose()`, and the provider pushes whatever
+      // this hands back into `_viewDisposables`.
+      onDidReceiveMessage: vi.fn(() => ({ dispose: vi.fn() })),
+      asWebviewUri: (u: unknown) => u, cspSource: 'vscode-webview:',
+    };
+    provider.resolveWebviewView(
+      { webview, onDidDispose: vi.fn(() => ({ dispose: vi.fn() })), visible } as unknown as import('vscode').WebviewView,
+      {} as import('vscode').WebviewViewResolveContext,
+      { isCancellationRequested: false, onCancellationRequested: vi.fn() } as unknown as import('vscode').CancellationToken,
+    );
+    return { postMessage };
+  }
+
+  /** Session ids of the last `updateSessions` push, or undefined when none was made. */
+  function lastActiveIds(postMessage: ReturnType<typeof vi.fn>): string[] | undefined {
+    const pushes = postMessage.mock.calls
+      .map(c => c[0] as { type: string; sessions?: Array<{ sessionId: string }> })
+      .filter(m => m?.type === 'updateSessions');
+    const last = pushes[pushes.length - 1];
+    return last && (last.sessions ?? []).map(s => s.sessionId);
+  }
+
+  const START = new Date('2026-09-02T12:00:00Z').getTime();
+
+  beforeEach(() => {
+    mockReadLiveWindows.mockResolvedValue([]);
+    vi.useFakeTimers({ now: START, toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  /** `working`, held by no window, last written `agoMs` ago. Its fingerprint will never move again. */
+  function settledSession(sessionId: string, agoMs: number) {
+    return {
+      sessionId, projectPath: '/home/me/work/alpha', projectName: 'alpha', title: `t-${sessionId}`,
+      updatedAt: new Date(START - agoMs),
+      status: 'working' as const, source: 'claude' as const,
+    };
+  }
+
+  it('ages a settled session out of the worklist with nothing else changing', async () => {
+    // One minute inside STALE_FALLBACK_WINDOW_MS at START.
+    const provider = makeProvider([settledSession('settled-1', 119 * 60_000)]);
+    const { postMessage } = resolveWebviewCapturing(provider);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastActiveIds(postMessage)).toContain('settled-1');
+
+    // Two minutes on it is past the window. No session changed, so only the panel's own clock can
+    // notice — this is the assertion that fails without one.
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(lastActiveIds(postMessage)).not.toContain('settled-1');
+  });
+
+  it('leaves a session inside its window alone', async () => {
+    const provider = makeProvider([settledSession('fresh-1', 0)]);
+    const { postMessage } = resolveWebviewCapturing(provider);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(lastActiveIds(postMessage)).toContain('fresh-1');
+  });
+
+  it('does not repaint behind a hidden view', async () => {
+    // The probes reach into another extension host over the V8 inspector. Spending that on a panel
+    // nobody is looking at buys nothing, and the next reveal repaints anyway.
+    const provider = makeProvider([settledSession('hidden-1', 0)]);
+    const { postMessage } = resolveWebviewCapturing(provider, false);
+    await vi.advanceTimersByTimeAsync(0);
+    const afterResolve = postMessage.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(postMessage.mock.calls.length).toBe(afterResolve);
+  });
+
+  it('stops ticking once disposed', async () => {
+    const provider = makeProvider([settledSession('disposed-1', 0)]);
+    const { postMessage } = resolveWebviewCapturing(provider);
+    await vi.advanceTimersByTimeAsync(0);
+    provider.dispose();
+    const afterDispose = postMessage.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(postMessage.mock.calls.length).toBe(afterDispose);
+  });
+});

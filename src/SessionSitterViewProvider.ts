@@ -33,6 +33,27 @@ const HISTORY_LIMIT = 50;
 // inspector being hit on every pass.
 const PARTITION_CACHE_MS = 2_000;
 
+/**
+ * How often the panel repaints on its own, with no change to react to.
+ *
+ * The panel needs a clock because every age bound it applies is measured against `Date.now()` at
+ * the moment `_partitionSessions` runs — the 2h `working` fallback and the probeless recency window
+ * in `isActiveSession`, the 24h finished→dormant split in `resolveDisplayStatus`, and the pruning of
+ * a dead window's session ids by `readLiveWindows`. Every *other* repaint trigger is a change
+ * signal, and the one that matters most is gated: `onDidChangeSessions` fires only when
+ * `sessionsFingerprint` moves, and that stops moving for good once a session's raw status settles on
+ * a transcript nobody will write to again.
+ *
+ * So without this timer a bound is not a bound. A row that should have aged out hours ago keeps the
+ * verdict the panel last reached, until something unrelated happens in the fleet and the whole list
+ * silently corrects itself at once — which is exactly how it was found: a day-old session sat at the
+ * top of the worklist until a new session was started somewhere else.
+ *
+ * Fifteen seconds because the shortest bound it serves is two hours. Finer buys nothing and each
+ * tick costs two inspector round-trips into other extension hosts.
+ */
+const PANEL_REPAINT_MS = 15_000;
+
 /** Key under which the last-viewed timestamps live in the extension's global state. */
 export const LAST_VIEWED_KEY = 'sessionSitter.lastViewed';
 
@@ -171,6 +192,22 @@ export class SessionSitterViewProvider implements vscode.WebviewViewProvider, vs
         if (this._historyOpen) { void this._pushHistory(); }
       })
     );
+
+    // Repaint on a clock, not only on a change. See PANEL_REPAINT_MS: every age bound the panel
+    // applies is read from `Date.now()` when the partition runs, and the change signals above cannot
+    // see time pass — a settled session's fingerprint never moves again.
+    //
+    // Skipped while the view is hidden. Each tick runs the Bob and Claude probes over the V8
+    // inspector, which is not worth spending on a panel nobody is looking at, and revealing the view
+    // resolves it again and repaints anyway.
+    const repaintTimer = setInterval(() => {
+      if (!webviewView.visible) { return; }
+      void this._pushSessions();
+      if (this._historyOpen) { void this._pushHistory(); }
+    }, PANEL_REPAINT_MS);
+    // Into `_viewDisposables` rather than a field: that list is cleared at the top of this method, so
+    // re-resolving the view replaces this timer instead of leaving a second one ticking.
+    this._viewDisposables.push({ dispose: () => clearInterval(repaintTimer) });
 
     // Refresh when Claude Code tabs open, close, or get renamed (tabGroups API added in VS Code 1.65)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

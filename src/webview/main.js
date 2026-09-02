@@ -423,6 +423,15 @@
   /** Agents that expose no liveness signal at all, so their rows can only ever be dormant. */
   const PROBELESS_SOURCES = ['codex', 'chat'];
 
+  /**
+   * The period of the `working` spinner, in milliseconds.
+   *
+   * Must match `animation: spin <duration>` on `.status-working` in styles.css. A test asserts the
+   * two agree, because a mismatch is invisible in review and shows up only as a marker that jumps
+   * instead of turning.
+   */
+  const SPIN_PERIOD_MS = 700;
+
   // Uniform metadata rows shared by buildTab and buildHistoryItem — appends
   // the source badge (Claude/Bob/Codex/Chat) and the workspace pill (or
   // "(no workspace)" fallback) as separate children so `.tab-text` (flex
@@ -744,6 +753,21 @@
     const status = session.status || 'dormant';
     const el = document.createElement('span');
     el.className = 'status-indicator status-' + status;
+    if (status === 'working') {
+      // Anchor the spin's phase to the wall clock.
+      //
+      // renderTabs() clears the strip and rebuilds every row on every push, and a brand-new element
+      // starts its animation at 0deg. Pushes are driven by `sessionsFingerprint` moving, which for a
+      // streaming session means every 250ms watcher debounce — Claude writes the transcript far
+      // faster than that. So the one state that animates is also the one rebuilt several times a
+      // second, and the ring kept snapping back to 0 before it had turned a quarter. It read as a
+      // ring twitching in place rather than one turning.
+      //
+      // A negative delay starts the animation mid-cycle instead of postponing it, so each new
+      // element picks up the phase the one it replaced was at. Harmless under
+      // prefers-reduced-motion: there is no animation left to offset.
+      el.style.animationDelay = '-' + ((Date.now() % SPIN_PERIOD_MS) / 1000) + 's';
+    }
     const tip = statusTooltip(session);
     el.setAttribute('title', tip);
     // The shape is the whole content, so a screen reader gets nothing without this.
