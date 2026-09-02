@@ -101,6 +101,7 @@ peer discovery — but they are marked read-only, because only that machine can 
 | `/new` | Start a session: pick a workspace, then Claude or Bob. |
 | `/who` | Which window owns which session, and why. Explains a read-only row. |
 | `/help` | The commands, and the current write limits. |
+| `/forget` | Sent **inside a topic**: delete that topic. The way to clear a thread the automatic cleanup cannot see — see [Topics the cleanup cannot see](#topics-the-cleanup-cannot-see). |
 
 The list is ordered by workspace and then title, **not** by time. It is edited in place, and a time
 ordering would reshuffle every row on every poll. A row moves only when a session appears,
@@ -144,6 +145,43 @@ would actually have missed.
 If the bot cannot delete — it needs `can_manage_topics` in the group — the topic is closed instead
 and the delete is retried on later passes, so the reason ends up in the extension's Output log rather
 than being silently dropped.
+
+### Topics the cleanup cannot see
+
+Every automatic pass works from the record store in
+`~/.claude/session-sitter/bus/topics/<threadId>.json`. One file per topic, written when the topic is
+created, deleted when the topic is.
+
+**That store is the only handle on a topic.** The Bot API has no call that lists a group's topics:
+`getForumTopics` exists, but it is a user-API method and
+[says so explicitly](https://core.telegram.org/method/channels.getForumTopics) — "Only users can use
+this method". A bot can create, rename, close, reopen and delete a topic it knows the id of, and it
+can learn an id from a message somebody sends in it. It cannot ask what is there.
+
+So a topic whose record is missing is not merely unpruned, it is **invisible**. Pruning never
+considers it, the active list never counts it, and nothing will ever remove it. It stays in the
+group's topic list for as long as the group exists.
+
+Two things used to cause that, and both are now closed:
+
+- **A record that failed to write.** `createTopicFor` created the topic and then saved the record. A
+  failure in between left a live thread that nothing owned. The topic is now deleted again if its
+  record cannot be written.
+- **A record that could not be read.** `TopicStore.all()` skips a file it cannot parse, which is
+  right everywhere except pruning — there, skipping it hides a real thread. The filename is the
+  thread id, which is all a delete needs, so `damagedThreadIds()` reports those and the pruning pass
+  removes the thread and the unreadable file together.
+
+What neither can fix is a topic whose record was **already** gone — deleted by hand, lost with the
+`bus/` directory, or created by a build before the store existed. Nothing can find those, so
+`/forget` is the way out: send it inside the thread you want gone. The message carries its
+`message_thread_id`, which is the one remaining thing that identifies such a thread, so pointing at
+it by typing in it is the only mechanism Telegram leaves available.
+
+Note the store is keyed to the **extension host's home directory**. A WSL-remote window and a
+Windows-local window on the same physical machine keep separate stores, and so does every other
+machine in the fleet. Each prunes what it created; a topic created by a host that never runs again is
+one nothing will clean up, so it wants `/forget` too.
 
 ### `/history` — bringing a session back
 

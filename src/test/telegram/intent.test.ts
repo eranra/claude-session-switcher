@@ -230,3 +230,29 @@ describe('callback payloads', () => {
     expect(decodeCallback('rc|close|nope').kind).toBe('unknown');
   });
 });
+
+// ── /forget: the only way to reach a topic the store has lost ─────────────────
+//
+// A topic is reachable only through its record. The Bot API has no call that lists a group's topics
+// — `getForumTopics` is a user-API method and says as much — so once a record is gone, pruning
+// cannot see the thread and no automatic pass ever will. What still identifies it is a message typed
+// inside it, because that carries `message_thread_id`. `/forget` turns that into an instruction.
+//
+// It has to carry its thread id, because the thread it was typed in *is* the argument.
+describe('classifyUpdate — /forget', () => {
+  it('carries the thread it was typed in', () => {
+    expect(classifyUpdate(message({ text: '/forget', message_thread_id: 99 }), auth))
+      .toEqual({ kind: 'forgetTopic', threadId: 99 });
+  });
+
+  it('reports General as having no thread, so the handler can say so', () => {
+    // Deleting General is not possible and not wanted. The handler explains rather than failing.
+    expect(classifyUpdate(message({ text: '/forget' }), auth))
+      .toEqual({ kind: 'forgetTopic', threadId: null });
+  });
+
+  it('accepts the group-qualified form Telegram sends in a group', () => {
+    expect(classifyUpdate(message({ text: '/forget@my_bot', message_thread_id: 99 }), auth))
+      .toEqual({ kind: 'forgetTopic', threadId: 99 });
+  });
+});

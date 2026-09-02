@@ -5,6 +5,50 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.6 — Reach the topics the cleanup could not see
+
+0.8.4 made a session's topic get **deleted** when the session leaves the active list, and that works.
+What it could not do was see a topic whose record was gone, and a real group still filled up with
+leftover threads for exactly that reason.
+
+Every pass works from the record store, one file per topic under
+`~/.claude/session-sitter/bus/topics/`. That store is the *only* handle on a topic, because the Bot
+API has no call that lists a group's topics — `getForumTopics` is a user-API method and
+[says so](https://core.telegram.org/method/channels.getForumTopics): "Only users can use this
+method". A bot can delete a thread whose id it knows and can learn an id from a message sent in one.
+It cannot ask what is there. So a topic with no record is not merely unpruned — it is invisible, and
+nothing will ever remove it.
+
+Three changes:
+
+- **A record that cannot be read no longer hides its topic.** `TopicStore.all()` skips a file it
+  cannot parse, which is correct for every caller that needs a session mapping and exactly wrong for
+  pruning. The filename is the thread id, which is all a delete needs, so `damagedThreadIds()`
+  reports those and the pruning pass removes the thread and the unreadable file together. Only a file
+  that reads cleanly and still fails to parse counts — a read that throws is far more likely to be
+  this store's own `rename` landing mid-scan, and treating that as a lost topic would delete a live
+  session's thread.
+- **A failed record write no longer strands a topic.** `createTopicFor` created the topic in Telegram
+  and then saved the record; a failure in between left a thread nothing owned, permanently. The topic
+  is now deleted again if its record cannot be written, because a topic that cannot be recorded is
+  worse than no topic.
+- **`/forget` deletes the topic it is sent in.** The only way to reach a thread whose record was
+  already gone — deleted by hand, lost with the `bus/` directory, or created before the store
+  existed. A message carries its `message_thread_id`, so typing in the thread is the one thing that
+  still identifies it. An active session's topic is refused rather than deleted, since it would come
+  straight back on the next pass.
+
+For `/forget` to arrive at all, a slash command now routes to remote control **wherever** it was
+typed. It previously reached remote control only from General, so a command sent inside a thread the
+store did not recognise went to the supervision channel, which has no concept of a topic — which
+threw away the one signal capable of finding these threads. `/sessions` typed in a topic used to
+vanish for the same reason.
+
+One thing worth knowing, now written down in `docs/TELEGRAM.md`: the store is keyed to the extension
+host's home directory. A WSL-remote window and a Windows-local window on one machine keep separate
+stores, as does every other machine in the fleet. Each prunes what it created, so a topic created by
+a host that never runs again is one nothing cleans up, and it wants `/forget` too.
+
 ### 0.8.5 — A message from Telegram finds its own Claude session
 
 Sending to a Claude session from Telegram answered `Its window has 2 Claude sessions open and this

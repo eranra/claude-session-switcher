@@ -111,3 +111,42 @@ describe('UpdateQueue', () => {
     expect(q.drain().map(u => u.update_id)).toEqual([3, 4, 5]);
   });
 });
+
+// ── A command has to reach a thread the store has forgotten ───────────────────
+//
+// A topic is only reachable through its record, because the Bot API has no call that lists a group's
+// topics — `getForumTopics` belongs to the user-facing APIs and says so. So when a record goes
+// missing, its thread becomes permanent: pruning cannot see it, and nothing else knows it is there.
+//
+// The one thing that still identifies such a thread is somebody typing in it, because the message
+// carries `message_thread_id`. Sending that to supervision — which has no idea what a topic is —
+// threw away the only signal that could ever find these threads. A slash command now goes to remote
+// control wherever it was typed.
+describe('routeUpdate — commands in an unrecorded thread', () => {
+  function message(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return { message: { chat: { id: -1 }, from: { id: 42 }, text: 'hello', ...over } };
+  }
+
+  it('claims a slash command typed in a thread it has no record for', () => {
+    expect(routeUpdate(message({ message_thread_id: 99, text: '/forget' }), context))
+      .toBe('remoteControl');
+  });
+
+  it('claims a command in an unrecorded thread even with leading whitespace', () => {
+    expect(routeUpdate(message({ message_thread_id: 99, text: '  /forget' }), context))
+      .toBe('remoteControl');
+  });
+
+  it('still leaves bare text in an unrecorded thread to supervision', () => {
+    // Only a command is claimed. Plain text there is still as likely to be a decision reply, and
+    // stealing it would break the older channel for no gain.
+    expect(routeUpdate(message({ message_thread_id: 99 }), context)).toBe('supervision');
+  });
+
+  it('still gives supervision a reply to a live card in an unrecorded thread', () => {
+    const update = message({
+      message_thread_id: 99, text: '/forget', reply_to_message: { message_id: 555 },
+    });
+    expect(routeUpdate(update, context)).toBe('supervision');
+  });
+});

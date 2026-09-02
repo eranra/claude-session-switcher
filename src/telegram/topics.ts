@@ -82,20 +82,60 @@ export class TopicStore {
     this.dir = topicsDir(homedir);
   }
 
-  async all(): Promise<TopicRecord[]> {
-    let files: string[];
+  /** The record files currently on disk, `.tmp-` writes excluded. */
+  private async files(): Promise<string[]> {
     try {
-      files = (await fs.promises.readdir(this.dir))
+      return (await fs.promises.readdir(this.dir))
         .filter(f => f.endsWith('.json') && !f.includes('.tmp-'));
     } catch {
       return [];
     }
+  }
+
+  async all(): Promise<TopicRecord[]> {
     const out: TopicRecord[] = [];
-    for (const file of files) {
+    for (const file of await this.files()) {
       try {
         const rec = parseTopic(await fs.promises.readFile(path.join(this.dir, file), 'utf8'));
         if (rec !== null) { out.push(rec); }
       } catch { /* malformed or vanished — skip */ }
+    }
+    return out;
+  }
+
+  /**
+   * Thread ids whose record file is present but unreadable.
+   *
+   * `all()` skips these, and for every other caller that is correct: a half-written file is not a
+   * session mapping, and guessing at one would route somebody's message into the wrong session.
+   * Pruning is the exception, and the reason this method exists.
+   *
+   * A topic is only reachable through its record. The Bot API has no call that lists a group's
+   * topics — `getForumTopics` belongs to the user-facing APIs and says so ("Only users can use this
+   * method") — so a topic whose record the store has stopped understanding cannot be found again by
+   * any route at all. It stays in the group's topic list for as long as the group exists.
+   *
+   * The filename is the thread id, so the delete needs nothing out of the file's contents. Reporting
+   * the id lets pruning remove the thread and the unreadable file together, which is the outcome a
+   * lost record should have.
+   *
+   * Only a file that reads cleanly and still fails to parse counts. A read that throws is far more
+   * likely to be this store's own `rename` landing mid-scan than a damaged record, and treating that
+   * as a lost topic would delete a live session's thread.
+   */
+  async damagedThreadIds(): Promise<number[]> {
+    const out: number[] = [];
+    for (const file of await this.files()) {
+      const threadId = Number(file.slice(0, -'.json'.length));
+      // Not one of ours. Another tool's file, or a name we never wrote — leave it alone.
+      if (!Number.isSafeInteger(threadId) || threadId <= 0) { continue; }
+      let raw: string;
+      try {
+        raw = await fs.promises.readFile(path.join(this.dir, file), 'utf8');
+      } catch {
+        continue;
+      }
+      if (parseTopic(raw) === null) { out.push(threadId); }
     }
     return out;
   }

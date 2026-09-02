@@ -73,9 +73,17 @@ export function routeUpdate(
   const threadId = typeof message.message_thread_id === 'number' ? message.message_thread_id : null;
   if (threadId !== null && context.sessionThreadIds.has(threadId)) { return 'remoteControl'; }
 
-  // A slash command in General is remote control's; General is where its commands live.
+  // A slash command is remote control's, wherever it was typed.
+  //
+  // General is where most of them live, but the thread cases matter more than they look. A topic is
+  // only reachable through its record, because the Bot API cannot list a group's topics —
+  // `getForumTopics` is a user-API method and says so — so a thread whose record has gone missing is
+  // invisible to pruning and to everything else. Somebody typing in it is the only thing left that
+  // still says the thread is there, and sending that to supervision, which has no concept of a
+  // topic, discarded the one signal that could ever reach these threads. `/forget` is what a user
+  // types into such a thread to be rid of it.
   const text = typeof message.text === 'string' ? message.text : '';
-  if (threadId === null && text.trimStart().startsWith('/')) { return 'remoteControl'; }
+  if (text.trimStart().startsWith('/')) { return 'remoteControl'; }
 
   // Anything else in General could be a supervision reply with no reply-to — which is how the
   // existing channel already treats a bare message — so it goes there.

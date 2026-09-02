@@ -288,7 +288,19 @@ export class RemoteControlService {
       openedAt: this.now(),
       createdAt: this.now(),
     };
-    await this.topics.save(record);
+    // The topic exists in the group from here on, and the record is the only thing that can ever
+    // reach it again — a bot cannot list a group's topics, so a topic with no record is in the
+    // sidebar for good. If the write fails, take the topic back out rather than leaving a thread
+    // nothing owns.
+    try {
+      await this.topics.save(record);
+    } catch (err) {
+      this.log(
+        `remote control: could not record topic ${record.threadId} for ${session.sessionId} `
+        + `(${String(err)}) — deleting it, because an unrecorded topic can never be cleaned up`);
+      await this.forum.deleteTopic(record.threadId);
+      return null;
+    }
     await this.forum.send(
       renderTopicHeader(session, resolved, writeBlockedReason(session, resolved)),
       record.threadId,
@@ -389,6 +401,75 @@ export class RemoteControlService {
           await this.topics.save(record);
         }
       }
+    }
+    await this.pruneDamagedTopics();
+  }
+
+  /**
+   * Delete the topics whose record file can no longer be read.
+   *
+   * `topics.all()` skips an unreadable file, so without this the thread it names is not merely
+   * unpruned — it is unreachable. A bot cannot ask Telegram what topics a group has
+   * (`getForumTopics` is a user-API method), so the record is the only handle on a topic that exists,
+   * and a record nobody can parse means a thread nobody can ever remove.
+   *
+   * The filename carries the thread id, which is the whole of what a delete needs. Whatever the
+   * session was, it is not one this window can mirror any more, so the thread goes and the file goes
+   * with it.
+   */
+  /**
+   * Delete the topic a `/forget` was typed in.
+   *
+   * This is the manual counterpart to pruning, and it exists because pruning cannot be complete on
+   * its own. Every automatic pass works from the record store, and the Bot API has no call that
+   * lists a group's topics — `getForumTopics` belongs to the user-facing APIs — so a topic whose
+   * record was never written or has since been lost is invisible to this extension entirely. It
+   * cannot be counted, named, or removed. It simply stays in the group.
+   *
+   * A message typed inside such a thread carries its `message_thread_id`, which makes it the only
+   * thing that can still point at one. So the user points, and the thread goes.
+   *
+   * An active session's topic is refused rather than deleted: it would only be recreated on the next
+   * pass, and answering a request with a thread that reappears is worse than saying no.
+   */
+  private async forgetTopic(threadId: number | null, active: ClaudeSession[]): Promise<void> {
+    if (threadId === null) {
+      await this.forum.send(
+        'Send /forget inside the topic you want removed. General cannot be deleted.', null);
+      return;
+    }
+    const record = await this.topics.byThread(threadId);
+    if (record !== null && active.some(s => s.sessionId === record.sessionId)) {
+      await this.forum.send(
+        'This topic belongs to an active session, so it would come straight back on the next pass. '
+        + 'It is deleted automatically once the session leaves the worklist.',
+        threadId,
+      );
+      return;
+    }
+    const removed = await this.forum.deleteTopic(threadId);
+    if (removed.ok || removed.topicGone === true) {
+      await this.topics.remove(threadId);
+      this.log(`remote control: deleted topic ${threadId} on request`);
+      return;
+    }
+    this.log(`remote control: could not delete topic ${threadId} on request: ${removed.error}`);
+    await this.forum.send(
+      `Could not delete this topic: ${removed.error}. The bot needs the "Manage topics" right in `
+      + 'this group.',
+      threadId,
+    );
+  }
+
+  private async pruneDamagedTopics(): Promise<void> {
+    for (const threadId of await this.topics.damagedThreadIds()) {
+      const removed = await this.forum.deleteTopic(threadId);
+      if (removed.ok || removed.topicGone === true) {
+        await this.topics.remove(threadId);
+        this.log(`remote control: deleted topic ${threadId} — its record could not be read`);
+        continue;
+      }
+      this.log(`remote control: could not delete damaged topic ${threadId}: ${removed.error}`);
     }
   }
 
@@ -560,6 +641,10 @@ export class RemoteControlService {
 
       case 'newSessionMenu':
         await this.sendNewMenu(fleet.windows);
+        return;
+
+      case 'forgetTopic':
+        await this.forgetTopic(intent.threadId, fleet.active);
         return;
 
       case 'sendToTopic':

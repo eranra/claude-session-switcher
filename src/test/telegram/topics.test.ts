@@ -174,3 +174,37 @@ describe('topicsToDelete', () => {
     expect(topicsToDelete([a, b], new Set<string>(), LATER)).toEqual([a, b]);
   });
 });
+
+// ── A record that cannot be read must not hide a topic ────────────────────────
+//
+// `all()` skips a file it cannot parse, and for every other caller that is right — a half-written
+// record is not a session mapping. For pruning it is exactly wrong: the topic is real, it is in the
+// group, and skipping its record makes it unreachable. A bot cannot list a group's topics
+// (`getForumTopics` is a user-API method: "Only users can use this method"), so a topic the store
+// has forgotten can never be found again by any means. The filename is the thread id, which is
+// enough to delete it, so a damaged record leaves the group tidy instead of leaving a thread behind
+// for good.
+describe('TopicStore: damaged records', () => {
+  it('reports the thread id of a file it cannot parse', async () => {
+    const store = new TopicStore(home);
+    await store.save(record({ threadId: 11, sessionId: 'live' }));
+    fs.mkdirSync(topicsDir(home), { recursive: true });
+    fs.writeFileSync(path.join(topicsDir(home), '22.json'), '{ truncated', 'utf8');
+
+    expect((await store.all()).map(t => t.threadId)).toEqual([11]);
+    expect(await store.damagedThreadIds()).toEqual([22]);
+  });
+
+  it('ignores files whose name is not a thread id', async () => {
+    const store = new TopicStore(home);
+    fs.mkdirSync(topicsDir(home), { recursive: true });
+    fs.writeFileSync(path.join(topicsDir(home), 'notes.json'), 'whatever', 'utf8');
+    expect(await store.damagedThreadIds()).toEqual([]);
+  });
+
+  it('does not report a record that parses', async () => {
+    const store = new TopicStore(home);
+    await store.save(record({ threadId: 33 }));
+    expect(await store.damagedThreadIds()).toEqual([]);
+  });
+});

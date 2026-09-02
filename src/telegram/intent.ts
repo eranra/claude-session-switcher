@@ -30,6 +30,18 @@ export type Intent =
   | { kind: 'newSessionMenu' }
   /** A button tap. `data` is the raw callback payload. */
   | { kind: 'callback'; data: string; callbackId: string; threadId: number | null }
+  /**
+   * Remove the topic this was typed in.
+   *
+   * The thread it arrived in is the argument, which is the entire reason this command exists. A
+   * topic is reachable only through its record, and the Bot API cannot list a group's topics —
+   * `getForumTopics` is a user-API method and says so — so a topic whose record has gone missing is
+   * invisible to pruning and to every other automatic pass. A message typed inside it is the one
+   * remaining thing that proves the thread is there, so this turns that into a way out.
+   *
+   * `threadId` is null for General, which cannot be deleted; the handler says so rather than trying.
+   */
+  | { kind: 'forgetTopic'; threadId: number | null }
   /** Free text typed inside a session topic — a prompt for that session. */
   | { kind: 'sendToTopic'; threadId: number; text: string }
   /** Free text with no topic, in a group that is not a forum. Cannot be routed. */
@@ -114,6 +126,7 @@ export function classifyUpdate(update: Record<string, unknown>, auth: AuthConfig
       case 'help': return { kind: 'help' };
       case 'who': return { kind: 'who' };
       case 'new': return { kind: 'newSessionMenu' };
+      case 'forget': return { kind: 'forgetTopic', threadId };
       default: return { kind: 'ignore', reason: `unknown command /${command}` };
     }
   }
