@@ -5,6 +5,56 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### 0.8.5 — A message from Telegram finds its own Claude session
+
+Sending to a Claude session from Telegram answered `Its window has 2 Claude sessions open and this
+build cannot tell them apart, so nothing was sent.` — reliably, for anyone who works with more than
+one Claude tab. The refusal was correct; the reason for it was not.
+
+`buildTargetedInjectFn` looked for the session id **on the channel**: the channel map key, the
+channel's own scalar properties, `query.initConfig`. It is on none of them. Claude builds a channel as
+`{in, query, pid, resolvePid, vscodeMcpServer, mcpServers, …}` and keys it by a `channelId` its webview
+invents, so the search could not succeed on any build. One session open worked only because of the
+sole-channel fallback; two never worked at all.
+
+The link does exist, and it runs through the surface showing the session — by object identity, not by
+name:
+
+- `sessionPanels: Map<sessionId, WebviewPanel>` gives the tab. It is self-pruning, and setting a
+  session on a panel deletes that panel's previous entry, so one panel means one session.
+- `sessionStates: Map<sessionId, {info, author}>` gives the authoring surface when there is no panel
+  entry — the panel for a tab, the comm object itself for the sidebar. Claude prunes its own state by
+  that same identity.
+- A comm stores the panel it hosts as `panelTab`.
+
+Chaining those gives sessionId → surface → comm → that comm's channel. Two tabs are now two comms with
+one channel each, and each message lands in its own session: status `ok:owner`. The old id search still
+runs, narrowed to the owning comm, so a future Claude build that does expose the id keeps working.
+
+What still refuses, and why:
+
+- **One surface has shown several sessions.** `sessionStates` accumulates — an entry goes when its
+  surface is disposed, not when the surface switches session — so several ids can name one author while
+  only one is live. Nothing in the manager says which, so the route declines rather than pick. The
+  message now says to focus the session and send again, which is the action that fixes it.
+- **Two comms claiming one surface**, and **a session with no channel at all**. Same refusal, same
+  reason: delivering a prompt to the wrong agent is worse than not delivering it.
+
+Checked against every Claude Code build installed here (2.1.237 through 2.1.241). `panelTab` and
+`sessionPanels` are present in all of them, so tabs resolve on all of them. `author` arrived in
+2.1.238 — 2.1.237 stores a flat `{sessionId, state, title}` with no owner — so on that one build a
+sidebar session has no ownership link and falls back to the previous behaviour.
+
+Two things make the new route safe to depend on:
+
+- **Identity, not field names.** A comm is matched against the owning surface through *every* own
+  property, not just `panelTab`. A rename in a Claude release costs targeting and falls back to
+  refusing; it cannot start sending to the wrong session.
+- **A probe that runs the real code.** `sessionSitter.probeClaudeTargeting` ("Probe Claude Targeting")
+  reports, per session, which channel a message would land in and by which step — writing nothing. It
+  shares the resolution snippet with the sender, so it reports the decision rather than a second
+  implementation's opinion of it. After a Claude Code update, that command is the check.
+
 ### 0.8.4 — Telegram shows the active sessions, and nothing else
 
 A dead session's topic was **closed**, and closing does not remove it. Telegram keeps a closed topic

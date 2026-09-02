@@ -21,7 +21,7 @@ import {
   installClaudeAnswerHook,
   installClaudeQuestionHook,
 } from './agents/QuestionProbe';
-import { InspectorClaudeSender } from './agents/ClaudeSender';
+import { InspectorClaudeSender, dumpClaudeTargeting } from './agents/ClaudeSender';
 import { InspectorClaudeApprover } from './agents/ClaudeApprover';
 import { BUILD_TIME, BUILD_VERSION } from './buildInfo';
 import { SessionExporter } from './SessionExporter';
@@ -189,6 +189,15 @@ export function activate(context: vscode.ExtensionContext) {
         + '//  - a message-inject method on a session state or one of its children\n'
         + '//  - where a pending permission request + its resolver live\n',
         await dumpClaudeSendApprovalShape(log));
+    }),
+    vscode.commands.registerCommand('sessionSitter.probeClaudeTargeting', async () => {
+      await openJson(
+        '// Where a Telegram message to each Claude session would land (read-only — nothing is\n'
+        + '// sent). Check after a Claude Code update:\n'
+        + '//  - verdict "would-send:owner" — the session is matched to its own tab or sidebar\n'
+        + '//  - verdict "refused:ambiguous:N" with hasPanelTab false — Claude renamed the field\n'
+        + '//    a comm stores its panel in, and targeting has fallen back to refusing\n',
+        await dumpClaudeTargeting(log));
     }),
     vscode.commands.registerCommand('sessionSitter.probeBobQuestion', async () => {
       await openJson(

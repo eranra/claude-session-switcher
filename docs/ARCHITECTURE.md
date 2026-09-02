@@ -687,18 +687,38 @@ that session's topic, keeping its original `<requestId>|<index>` buttons so answ
 topic routes back to supervision. It falls back to the plain channel when a session has no topic yet —
 which is normal, since a prompt can be raised before the owning window's next pass creates one.
 
-### The refusal that matters
+### Finding the session's channel, and the refusal that matters
 
-Injecting into Claude means writing to a session's CLI transport, and the sessionId↔channel link is
-not exposed by every Claude build. `buildTargetedInjectFn` searches for it at send time — the channel
-map key, the channel's own scalar properties, `query.initConfig` — and falls back to the sole open
-channel when there is nothing to confuse it with.
+Injecting into Claude means writing to a session's CLI transport, and a channel carries no session id
+— Claude builds it as `{in, query, pid, resolvePid, vscodeMcpServer, …}` and keys it by a `channelId`
+its webview invents. `buildTargetedInjectFn` resolves the link at send time in three steps, strongest
+first:
 
-When several channels are open and none matches, **it sends nothing.** Delivering a user's prompt to
-the wrong agent is worse than not delivering it, because the wrong agent acts on it. The status is
-reported into the topic with what to do instead. That function is a string of JavaScript injected with
-`this` bound to Claude's manager, so it is tested against a fake manager via `new Function` — which
-covers the part that decides *which session gets the message* without needing a live IDE.
+1. **Ownership, by object identity.** `sessionPanels: Map<sessionId, WebviewPanel>` gives the tab
+   (self-pruning: setting a session on a panel deletes that panel's previous entry). Failing that,
+   `sessionStates: Map<sessionId, {info, author}>` gives the authoring surface — the panel for a tab,
+   the comm itself for the sidebar; Claude uses the same identity to prune its own state. A comm
+   stores the panel it hosts as `panelTab`. Matching the surface against each comm narrows the search
+   to that comm's channels, and one channel there is the answer.
+2. **A channel that names the id** — the map key, the channel's own scalar properties,
+   `query.initConfig`. Nothing exposes it today; the step stays for a build that does.
+3. **The sole open channel**, where there is nothing to confuse it with.
+
+Step 1 compares by identity against the comm *and every own property of it*, so a rename of
+`panelTab` in a Claude release costs targeting, not correctness. Two guards keep it honest: it declines
+when several sessions name one surface (state accumulates, so only one of them is live) and when two
+comms claim one surface.
+
+When nothing resolves and several channels are in scope, **it sends nothing.** Delivering a user's
+prompt to the wrong agent is worse than not delivering it, because the wrong agent acts on it. The
+status is reported into the topic with what to do instead.
+
+That resolution is a string of JavaScript injected with `this` bound to Claude's manager, so it is
+tested against a fake manager via `new Function` — which covers the part that decides *which session
+gets the message* without needing a live IDE. The same string backs `buildResolutionProbeFn`, behind
+the **Probe Claude Targeting** command: it reports, per session, the channel a send would land in and
+the step that got there, writing nothing. Sharing the snippet is the point — a probe agreeing with a
+second implementation would confirm nothing about the sender.
 
 ### The rate limit is a design constraint
 

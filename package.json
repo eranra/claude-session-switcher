@@ -2,7 +2,7 @@
   "name": "session-sitter",
   "displayName": "Session Sitter",
   "description": "Tabbed session switcher for Claude Code, IBM Bob, Codex and VS Code Chat — with traffic-light supervision of the actions your agents pause on",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "publisher": "eranra",
   "icon": "resources/logo.png",
   "galleryBanner": {
@@ -99,6 +99,11 @@
       {
         "command": "sessionSitter.probeClaudeInternals",
         "title": "Probe Claude Internals — send + approval (debug)",
+        "category": "Session Sitter"
+      },
+      {
+        "command": "sessionSitter.probeClaudeTargeting",
+        "title": "Probe Claude Targeting — where a message would land (debug)",
         "category": "Session Sitter"
       },
       {

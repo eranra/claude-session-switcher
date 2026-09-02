@@ -180,7 +180,7 @@ Reading works everywhere. Writing does not, and the limit is in the agent, not h
 | Agent | Read | Write |
 |---|:---:|---|
 | **Bob** | ✅ | ✅ Any task, live or historical |
-| **Claude** | ✅ | ⚠️ Sessions open in their own window |
+| **Claude** | ✅ | ✅ Sessions open in their own window |
 | **Codex** | ✅ | ❌ No message API exists |
 | **VS Code Chat** | ✅ | ❌ No message API exists |
 
@@ -190,20 +190,36 @@ dropping it.
 ### The Claude limit, precisely
 
 Session Sitter injects a message by writing to a session's CLI transport. Finding *which* transport
-belongs to a given session is done by searching, at the moment of sending, for a channel that carries
-that session id.
+belongs to a given session is done at the moment of sending, in three steps, strongest first.
 
-- **Found** → the message goes to that session.
-- **Not found, one Claude session open in that window** → it goes there. There is nothing to confuse
-  it with.
-- **Not found, several open** → **nothing is sent**, and the topic says so.
+1. **The surface that owns the session.** Claude's extension maps each session to the tab or sidebar
+   showing it, and each of those surfaces owns one channel. Following that link by object identity —
+   not by name or by string search — gives the session's own channel. This is the normal case, and it
+   works with any number of Claude sessions open in the window.
+2. **A channel that names the session id.** No channel does today. The step stays for a future Claude
+   build that exposes it.
+3. **The only channel open**, where there is nothing to confuse it with.
 
-That last case is a deliberate refusal. Delivering your prompt to the wrong agent is worse than not
-delivering it, because the wrong agent acts on it. Close the other sessions in that window, or use
-**Focus in IDE**.
+If none of the three resolves, **nothing is sent** and the topic says so. That is a deliberate
+refusal: delivering your prompt to the wrong agent is worse than not delivering it, because the wrong
+agent acts on it.
 
-Routing helps more than it sounds: a command goes to the window that owns the session, so the count
-that matters is Claude sessions in *that* window, not on the machine.
+Two cases still refuse, and both come from Claude's own bookkeeping:
+
+- **One surface has shown several sessions.** Claude's session state accumulates — an entry goes only
+  when its surface closes, not when the surface switches session — so several sessions can name the
+  same owner while only one of them is live. Rather than pick, Session Sitter refuses.
+- **A session is not open in its window at all.** There is no channel to write to. Use **Focus in
+  IDE** to resume it first, then send.
+
+Routing helps more than it sounds: a command goes to the window that owns the session, so what
+matters is that window, not the machine.
+
+Step 1 reads Claude internals that no API promises. Run **Session Sitter: Probe Claude Targeting**
+from the command palette to see, per session, which channel a message would land in and by which
+step — it writes nothing. After a Claude Code update, that is the check: a window full of
+`refused:ambiguous:N` with `hasPanelTab: false` means Claude moved the field, and targeting has
+fallen back to refusing rather than guessing.
 
 ---
 
@@ -279,7 +295,7 @@ Every failure is stated in the topic. Silence is never the answer. If it is, che
 | "Topics are not enabled in this group" | The chat is a group without Topics, or a channel. Enable Topics. |
 | Messages reach the wrong machine, or vanish | Two machines share a bot token. Give each its own. |
 | `⚠ No open window is responsible for that session` | Its workspace has no window open. Open it. |
-| `⚠ Its window has N Claude sessions open` | The Claude limit above. |
+| `⚠ Could not tell which of the N Claude sessions…` | The Claude limit above. Focus the session, then send again; **Probe Claude Targeting** says why. |
 | Topics stop updating after a window closes | Another window takes over reading within about 30 seconds. |
 
 The Output panel (*Session Sitter*) and `<stateDir>/session-sitter.log` carry the detail.
