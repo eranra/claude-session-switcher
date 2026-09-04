@@ -5,6 +5,36 @@ single name — **Session Sitter** — and `ci/check-naming.sh` enforces that.
 
 ## Unreleased
 
+### The team tier becomes reachable, from two machines and not one
+
+`session-sitter learn` could propose a user clause and a project clause but never a team clause, and the
+reason was structural rather than a bar set too high: `DecisionRecord` has no user field and one
+`dataDir` is one machine and one person, so *"two developers independently do this"* was not a
+measurable proposition from a single laptop at any number. That left the tier that binds people who did
+not write it as the only tier a human had to write by hand.
+
+`session-sitter learn --publish` makes it measurable, opt-in and per developer. It writes
+`<corpus>/data/aggregates/<host>.json` — a shape hash and three counts per shape, for shapes that
+cleared the user row on that machine — and stops. It runs no git and sends nothing anywhere; a human
+reviews the diff and commits it, in the same repo the clause it supports is reviewed in.
+
+Two properties are load-bearing, and each has a test that fails if it is removed:
+
+- **Per-host counts are cleared, never summed.** Every contributing host must independently clear the
+  whole user row before it is a witness at all; 11 occurrences on one laptop plus 1 on another is one
+  developer's habit with a witness. The team row then applies to the proposing host's own counts.
+- **An aggregate carries counts, never inputs.** The payload is built by naming the four keys it keeps,
+  so a command line, a `cwd`, a session name or anyone's prose is *absent* from the bytes rather than
+  masked in them. Witnessing hosts ship the unsalted shape hash — verifiable, so a reviewer can
+  recompute it from the readable clause — and never a command. `host` is a per-machine pseudonym unless
+  you pass `--allow-host-names`.
+
+A team clause proposed this way is `status: proposed` like every other proposal: inert until a human
+accepts it. One host publishes one file named for that host, and `ci/check-aggregates.sh` (installed in
+the corpus repo) checks both that invariant and that one commit touches one aggregate — which buys
+accident prevention and an audit trail, not authentication.
+
+
 ### 0.8.18 — Configuration you can have a conversation about
 
 Thirty-eight settings, six environment-variable groups, and a set of dependencies between them that

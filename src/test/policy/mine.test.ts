@@ -323,9 +323,11 @@ describe('the promotion bars (§5)', () => {
     expect(tierFor(support, false).tier).toBe('user');
   });
 
-  it('never proposes team, and records the declined promotion instead (§5.3, §12.9)', () => {
+  it('never proposes team from one machine, and records why instead (§5.3, §12.9)', () => {
     // Support clearing every team bar, on one machine. There is no `user` field on a
-    // `DecisionRecord`, so "two developers agreed" is not a measurable proposition at any threshold.
+    // `DecisionRecord`, so "two developers agreed" is not a measurable proposition at any threshold
+    // from a single laptop — only a published aggregate from another host can make it one, and this
+    // call passes none. See `aggregates.test.ts` for the case where one exists.
     const heavy = Array.from({ length: 20 }, (_, i) =>
       bash('pnpm test', {
         sessionId: `s-${i % 10}`,
@@ -335,7 +337,7 @@ describe('the promotion bars (§5)', () => {
     expect(distanceFrom('team', support).clears).toBe(true);
     const chosen = tierFor(support, true);
     expect(chosen.tier).toBe('project');
-    expect(chosen.declinedTeam).toBe(true);
+    expect(chosen.declinedTeam).toBe('no cross-user evidence in a single-machine corpus');
   });
 
   it('demotes to user rather than dropping when the project bars are missed (§5.2)', () => {

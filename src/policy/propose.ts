@@ -390,6 +390,11 @@ export interface Candidate extends ReplayCandidate {
   level: 'green' | 'yellow';
   tier: Tier;
   scope: string;
+  /**
+   * The other hosts that witnessed this shape, by published label — empty at every tier but `team`.
+   * Labels and nothing else: a witness contributes a hash and three counts, never a command.
+   */
+  witnessHosts: string[];
   match: string[];
   literal: string;
   cluster: string;
@@ -431,6 +436,10 @@ export interface GateOptions {
   /** The project slug, when one is configured. Without it no candidate can be project-scoped. */
   projectSlug: string | null;
   userSlug: string;
+  /** The team slug, when one is configured. Without it no candidate can be team-scoped. */
+  teamSlug?: string | null;
+  /** The hosts, other than this one, that witness this shape (`aggregates.ts`). Names, for the trace. */
+  witnessHosts?: readonly string[];
   /** True when the trail's rotated generation existed: the window's head is truncated. */
   windowRotated: boolean;
   /** Repo instruction files already in the classifier's context (§10.4). */
@@ -440,8 +449,8 @@ export interface GateOptions {
 export interface GateResult {
   candidate: Candidate | null;
   refusal: Refusal | null;
-  /** Recorded so the team ceiling is visible rather than mysterious (§5.3). */
-  declinedTeam: boolean;
+  /** Why team was declined, so the ceiling is visible rather than mysterious (§5.3). Null when not. */
+  declinedTeam: string | null;
   /** True when the rule is already stated in a repo instruction file. */
   alreadyStated: boolean;
 }
@@ -470,8 +479,8 @@ export interface GateResult {
  *    axes E8 exists for. Neither is worth doing; see the PR body.
  */
 export function gate(
-  cluster: Cluster, support: Support, tier: 'user' | 'project' | null,
-  declinedTeam: boolean, opts: GateOptions,
+  cluster: Cluster, support: Support, tier: 'user' | 'project' | 'team' | null,
+  declinedTeam: string | null, opts: GateOptions,
 ): GateResult {
   const refuse = (why: RefusalReason, detail?: string): GateResult => ({
     candidate: null, refusal: { cluster: cluster.key, why, detail }, declinedTeam,
@@ -558,7 +567,9 @@ export function gate(
   // dateless ids and one lane's `declined` file cannot suppress the other's candidate.
   const kind = lane === 'gap' ? 'gap-ask' : 'green-repeat';
   const slug = slugOf(cluster.segment, cluster.tool);
-  const scope = tier === 'project' ? (opts.projectSlug ?? '') : opts.userSlug;
+  const scope = tier === 'team'
+    ? (opts.teamSlug ?? '')
+    : tier === 'project' ? (opts.projectSlug ?? '') : opts.userSlug;
   if (!scope) { return refuse('below-floor', 'no slug configured for the chosen tier'); }
 
   const times = cluster.support.map(r => r.ts).sort();
@@ -591,6 +602,9 @@ export function gate(
       lastSeen: times[times.length - 1] ?? '',
       contradictions: 0,
       windowRotated: opts.windowRotated,
+      // Only meaningful at team tier, and named at every tier so a reader of a user-tier clause can
+      // see that the answer is "none" rather than "not recorded".
+      witnessHosts: tier === 'team' ? [...(opts.witnessHosts ?? [])] : [],
     },
     refusal: null,
     declinedTeam,
@@ -685,6 +699,20 @@ export function renderClause(candidate: Candidate, today: string): string {
       + `${bar(candidate.modelLatencyMs)} of model time that a written clause makes free.`);
   }
   prose.push(`Observed variants: ${candidate.variants.map(v => `\`${v}\``).join(', ')}.`);
+  // A team clause binds people who did not write it, so the one thing a reviewer cannot be left to
+  // guess is where the second developer's evidence came from. The counts above are this host's; the
+  // witnesses are named by their published label, and what each of them published is a hash of this
+  // clause's shape and three counts — no command line from any other machine is quoted here or
+  // anywhere else, because none crossed the boundary.
+  if (candidate.tier === 'team') {
+    prose.push(`Witnessed independently on ${candidate.witnessHosts.length} other host(s) `
+      + `(${candidate.witnessHosts.join(', ')}), each of which cleared the whole user row on its own `
+      + `counts for shape \`${candidate.shape12}\`. Per-host counts are never summed: this host's `
+      + `${candidate.support.occurrences} occurrences clear the team row by themselves, and the `
+      + 'witnesses answer a different question — whether anyone else does this too. Recompute '
+      + '`sha256("<tool>\\0<segment>")[0..12]` over the shape above to check a witness row refers to '
+      + 'this clause.');
+  }
   if (PATH_TOOLS.has(candidate.tool)) {
     prose.push('The matcher is anchored at the start of the '
       + `\`${PATH_TOOLS.get(candidate.tool)}\` value and requires a \`/\` immediately after the `

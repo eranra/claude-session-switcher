@@ -254,7 +254,7 @@ describe('§12.22 — the zero is always explained', () => {
     for (const key of [
       'v', 'ts', 'runId', 'stage', 'trigger', 'rev', 'emissionRule', 'corpusRoot', 'window',
       'signals', 'shapes', 'clusters', 'candidates', 'suppressed', 'refusals', 'replay', 'ceiling',
-      'declinedPromotions', 'proposals', 'model', 'durationMs', 'exitReason', 'error',
+      'aggregates', 'declinedPromotions', 'proposals', 'model', 'durationMs', 'exitReason', 'error',
     ]) {
       expect(line, key).toHaveProperty(key);
     }

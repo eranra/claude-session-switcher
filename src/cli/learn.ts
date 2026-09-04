@@ -14,6 +14,14 @@
  *     session-sitter learn --accumulate    fold new records only (what `SessionEnd` runs)
  *     session-sitter learn --status        the last five run lines from `pipeline.jsonl`
  *     session-sitter learn --quiet         no output; the identical code path, for a scheduler
+ *     session-sitter learn --publish       write this machine's aggregate for the team tier to merge
+ *
+ * `--publish` is the opt-in that makes team tier reachable at all, and it is deliberately the only
+ * thing in this file that writes outside `learned/`. It writes counts — a shape hash and three
+ * numbers per shape, no command line, no `cwd`, no prose — and it does **not** run git: the human
+ * commits the file, so nothing this process does ships anything anywhere. See
+ * `policy/aggregates.ts` for what crosses the boundary and what the one-file-per-host rule does and
+ * does not prevent.
  *
  * Exit codes follow the rest of the CLI: 0 answered, 1 something it needed was missing or broke,
  * 2 the arguments were wrong — plus 2 when another `learn` holds the lock, which is a statement about
@@ -21,8 +29,12 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { CliError, flagBool, parseFlags, type FlagSpec } from './args';
+import { hmacKey } from './export';
+import { buildAggregate, hostLabel, publishAggregate } from '../policy/aggregates';
+import { readShapes } from '../policy/mine';
 import { loadSettings } from '../hooks/settings';
 import { loadPolicyInputs } from '../hooks/permissionRequest';
 import { DecisionRecord, readJsonl } from '../audit/trail';
@@ -34,6 +46,8 @@ import type { Io } from './render';
 
 const FLAGS: FlagSpec = {
   '--accumulate': 'boolean',
+  '--publish': 'boolean',
+  '--allow-host-names': 'boolean',
   '--dry-run': 'boolean',
   '--status': 'boolean',
   '--quiet': 'boolean',
@@ -50,6 +64,16 @@ Usage:
 
 Options:
   --accumulate   fold new records and stop (what the SessionEnd hook runs)
+  --publish      write this machine's aggregate to <corpus>/data/aggregates/<host>.json
+                 and stop. Opt-in, per developer: it is what lets another machine's
+                 \`learn\` see that somebody else independently does the same thing, and
+                 it is the only way a team-tier clause can ever be proposed.
+                 Counts only — a shape hash and three numbers per shape. No command
+                 line, no working directory, no prose. It does not run git; commit the
+                 file yourself, in a PR your team reviews.
+  --allow-host-names
+                 publish the real short hostname instead of a per-machine pseudonym.
+                 Off by default: a hostname identifies a person's laptop.
   --dry-run      run every gate and every replay, write no files
   --status       print the last five pipeline runs
   --no-retire    skip ablation, so no retirement is proposed
@@ -127,6 +151,11 @@ export async function run(argv: readonly string[], io: Io): Promise<number> {
       + 'checkout containing `data/knowledge/`. Nothing can be proposed without somewhere to '
       + 'propose it', 1);
   }
+
+  const raw = flagBool(args, '--allow-host-names');
+  if (flagBool(args, '--publish')) {
+    return publish(corpusRoot, raw, io, say, json);
+  }
   const inputs = await loadPolicyInputs(settings);
 
   const records = readJsonl<DecisionRecord>(decisionsPath());
@@ -150,11 +179,55 @@ export async function run(argv: readonly string[], io: Io): Promise<number> {
     retire: !flagBool(args, '--no-retire'),
     instructionText: instructionText(process.cwd()),
     dryRun: flagBool(args, '--dry-run'),
+    // Both labels this machine could have published under, so its own aggregate can never be
+    // mistaken for another developer's — `--allow-host-names` must not be able to create a
+    // self-witness by changing which name the file is under.
+    selfHosts: selfHostLabels(),
   });
 
   if (json) { io.out(`${JSON.stringify(line, null, 2)}\n`); return exitCode; }
   for (const text of summarise(line, written, flagBool(args, '--dry-run'))) { say(text); }
   return exitCode;
+}
+
+/** Both labels this machine could have published under: pseudonymous, and raw under the opt-in. */
+export function selfHostLabels(env: NodeJS.ProcessEnv = process.env): string[] {
+  const host = os.hostname();
+  const key = hmacKey(env);
+  return [hostLabel(host, key, false), hostLabel(host, key, true)];
+}
+
+/**
+ * `--publish`: this machine's counts into the corpus working tree, and the git commands printed for
+ * the human to run.
+ *
+ * Printing the commands rather than running them is the whole safety property. Publishing is a claim
+ * about the team that a person has to make; a process that pushed on its own would be silent egress
+ * of derived work data, which is how tools get banned from a company.
+ */
+function publish(
+  corpusRoot: string, raw: boolean, io: Io, say: (t: string) => void, json: boolean,
+): number {
+  const aggregate = buildAggregate(readShapes(), hostLabel(os.hostname(), hmacKey(), raw), io.now());
+  const rel = publishAggregate(corpusRoot, aggregate);
+  if (json) {
+    io.out(`${JSON.stringify({ file: rel, host: aggregate.host, shapes: aggregate.shapes.length },
+      null, 2)}\n`);
+    return 0;
+  }
+  say(`wrote ${rel} — ${aggregate.shapes.length} shape(s) that cleared the user row on this `
+    + `machine, as host ${aggregate.host}`);
+  say('');
+  say('Counts only: a shape hash and three numbers each. No command line, no working directory,');
+  say('no prose. Nothing has been sent anywhere — review the diff, then commit it yourself:');
+  say('');
+  say(`    git -C ${corpusRoot} add ${rel}`);
+  say(`    git -C ${corpusRoot} commit -m 'aggregates: ${aggregate.host}'`);
+  say('');
+  say('One commit touches one aggregate file: yours. `ci/check-aggregates.sh` checks that, which');
+  say('catches a mistake and an audit trail, not a determined forger — a team clause still needs a');
+  say('human to accept it.');
+  return 0;
 }
 
 function statusRow(line: RunLine): string {

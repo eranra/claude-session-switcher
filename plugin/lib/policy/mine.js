@@ -647,29 +647,38 @@ function supportOfStat(stat) {
         cwd: counts[0]?.[0] ?? null,
     };
 }
-/**
- * The tier a candidate is proposed at, chosen by **scope** and then gated on that scope's bars.
- *
- * Narrowest wins, and demote rather than drop: a pattern clearing team bars but confined to one
- * project is a *project* clause, and a pattern that misses the project bars is written at `user`
- * rather than thrown away. Erring low is right because the tiers are not symmetric — a user-tier
- * `proposed` clause is the cheapest false positive in the system, while a wrong project clause is
- * read and cited by people who never saw the evidence.
- *
- * `team` is never returned. `DecisionRecord` has no user field and one `dataDir` is one machine and
- * one user, so from a single laptop "two developers agreed" is not a measurable proposition at any
- * threshold. The caller records a `declinedPromotions` entry so the ceiling is visible rather than
- * mysterious.
- */
-function tierFor(support, hasProjectSlug) {
+const NO_TEAM = { hasSlug: false, witnessHosts: 0 };
+function tierFor(support, hasProjectSlug, team = NO_TEAM) {
     const user = distanceFrom('user', support);
     const project = distanceFrom('project', support);
-    const team = distanceFrom('team', support);
-    const distances = [user, project, team];
-    // Recorded even though `team` can never be returned: a candidate whose *evidence* clears the team
-    // row and is held back only by the missing second host is the case a reader most needs named, and
-    // the `hosts` column is the one bar no single-machine trail can speak to at all.
-    const declinedTeam = team.occurrences >= 0 && team.sessions >= 0 && team.days >= 0;
+    const teamBar = distanceFrom('team', support);
+    const distances = [user, project, teamBar];
+    // The proposing host counts as one witness: clearing the team row implies clearing every bar the
+    // user row has, so its own witness test is satisfied by construction rather than by assumption.
+    const wanted = exports.THRESHOLDS.team.hosts;
+    const hosts = team.witnessHosts + 1;
+    const enough = hosts >= wanted;
+    if (teamBar.clears && team.hasSlug && enough) {
+        return { tier: 'team', distances, declinedTeam: null };
+    }
+    // Recorded whenever the *counts* were there: a candidate held back only by a missing second host is
+    // the case a reader most needs named, and `hosts` is the one bar no single-machine trail can speak
+    // to at all. Which prerequisite was missing is reported, because "declined" with no reason makes a
+    // misconfigured team slug look identical to a genuinely solo corpus.
+    let declinedTeam = null;
+    if (teamBar.occurrences >= 0 && teamBar.sessions >= 0 && teamBar.days >= 0) {
+        if (!enough) {
+            declinedTeam = team.witnessHosts === 0
+                ? 'no cross-user evidence in a single-machine corpus'
+                : `only ${hosts} of ${wanted} hosts independently cleared the user row`;
+        }
+        else if (!team.hasSlug) {
+            declinedTeam = 'no team slug configured, so there is no team scope to write into';
+        }
+        else {
+            declinedTeam = 'the team row needs 90% confinement to one working directory';
+        }
+    }
     if (hasProjectSlug && project.clears) {
         return { tier: 'project', distances, declinedTeam };
     }

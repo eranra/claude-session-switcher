@@ -149,6 +149,64 @@ describe('session-sitter learn', () => {
   });
 });
 
+describe('learn --publish', () => {
+  it('writes one aggregate of counts, names no command, and runs no git', async () => {
+    const { dir, corpus } = scratch([
+      record('pnpm verify', { sessionId: 's-A', ts: '2026-08-25T09:00:00.000Z' }),
+      record('pnpm verify --fix', { sessionId: 's-B', ts: '2026-08-27T09:00:00.000Z' }),
+      record('pnpm verify', { sessionId: 's-C', ts: '2026-09-01T09:00:00.000Z' }),
+    ]);
+    const io = fakeIo();
+    const env = { SESSION_SITTER_DATA_DIR: dir, KNOWLEDGE_LOCAL_REPO: corpus };
+    // Fold first, the way a real run does: `--publish` reports what the fold has, not what the
+    // trail has, so publishing before any fold is honestly empty rather than quietly re-reading.
+    await withEnv(env, () => run(['--accumulate'], fakeIo()));
+    expect(await withEnv(env, () => run(['--publish'], io))).toBe(0);
+
+    const files = fs.readdirSync(path.join(corpus, 'data', 'aggregates'));
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^h-[0-9a-f]{12}\.json$/);
+    const text = fs.readFileSync(path.join(corpus, 'data', 'aggregates', files[0]), 'utf8');
+    // Counts, and no command: the payload names `pnpm` nowhere, at any depth.
+    expect(text).not.toContain('pnpm');
+    expect(text).not.toContain('verify');
+    expect(text).not.toContain('/w/api');
+    expect(JSON.parse(text).shapes[0].occurrences).toBe(3);
+    // No clause file was written, and nothing was pushed: the human is handed the commands.
+    expect(fs.existsSync(path.join(corpus, 'data', 'knowledge'))).toBe(false);
+    expect(io.text()).toContain('git -C');
+    expect(io.text()).toContain('Nothing has been sent anywhere');
+  });
+
+  it('publishes a pseudonym by default and the real host only under the opt-in', async () => {
+    const { dir, corpus } = scratch([
+      record('pnpm verify', { sessionId: 's-A', ts: '2026-08-25T09:00:00.000Z' }),
+      record('pnpm verify', { sessionId: 's-B', ts: '2026-08-27T09:00:00.000Z' }),
+      record('pnpm verify', { sessionId: 's-C', ts: '2026-09-01T09:00:00.000Z' }),
+    ]);
+    const env = { SESSION_SITTER_DATA_DIR: dir, KNOWLEDGE_LOCAL_REPO: corpus };
+    await withEnv(env, () => run(['--accumulate'], fakeIo()));
+    await withEnv(env, () => run(['--publish'], fakeIo()));
+    await withEnv(env, () => run(['--publish', '--allow-host-names'], fakeIo()));
+    const files = fs.readdirSync(path.join(corpus, 'data', 'aggregates')).sort();
+    expect(files).toHaveLength(2);
+    expect(files.filter(f => f.startsWith('h-'))).toHaveLength(1);
+    // The raw one is this machine's short hostname, which is exactly why it is opt-in.
+    const raw = files.find(f => !f.startsWith('h-'))!;
+    expect(raw.replace('.json', '')).toBe(
+      os.hostname().split('.')[0].toLowerCase().replace(/[^a-z0-9_-]+/g, '-'));
+  });
+
+  it('refuses to publish with no corpus configured, rather than writing somewhere', async () => {
+    const { dir } = scratch();
+    await expect(withEnv(
+      { SESSION_SITTER_DATA_DIR: dir, KNOWLEDGE_LOCAL_REPO: undefined,
+        KB_SITTER_LOCAL_REPO: undefined },
+      () => run(['--publish'], fakeIo()),
+    )).rejects.toThrow(/KNOWLEDGE_LOCAL_REPO/);
+  });
+});
+
 describe('the repo instruction files it reads, and the one directory it does not', () => {
   it('reads CLAUDE.md and .claude/rules/*.md, in that order', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ss-instr-'));

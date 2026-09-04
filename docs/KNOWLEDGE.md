@@ -45,6 +45,49 @@ Start from [`../knowledge/bottom-line.template.md`](../knowledge/bottom-line.tem
 
 ---
 
+## The team tier, and the second machine it needs
+
+The miner (`session-sitter learn`) proposes user- and project-tier clauses from one machine's decision
+trail. It cannot propose a **team** clause from that alone, and the reason is structural rather than a
+threshold set too high: a decision record has no user field, and one data directory is one machine and
+one person, so *"two developers independently do this"* is not a measurable proposition from a single
+laptop at any number.
+
+The team tier is the tier that binds people who did not write it, so it is also the one where a learned
+proposal is most useful. What makes it measurable is an **opt-in per-host aggregate**:
+
+```bash
+session-sitter learn --publish       # writes <corpus>/data/aggregates/<host>.json
+git -C <corpus> add data/aggregates/ && git -C <corpus> commit -m 'aggregates: ...'
+```
+
+**What is in that file:** a shape hash and three counts per shape, and nothing else. No command line,
+no working directory, no session name, no prose anyone typed. It carries only shapes that cleared the
+user row on that machine, and `host` is a per-machine pseudonym unless you pass `--allow-host-names`.
+`session-sitter learn --publish` writes the file and stops — it runs no git and sends nothing anywhere;
+you review the diff and commit it, in a PR your team sees.
+
+**How the merge counts.** Per-host counts are **cleared, never summed.** Each contributing host must
+independently clear the whole user row (≥3 occurrences, ≥3 sessions, ≥2 days) before it counts as a
+witness at all — 11 occurrences on your laptop plus 1 on somebody else's is your habit with a witness,
+not a team practice. On top of that, the proposing machine must clear the team row on its own counts
+(≥12 occurrences, ≥8 sessions, ≥14 days, ≥90 % confined to one working directory) and at least two
+hosts must have cleared the user row. Until a second developer opts in, the run line records
+`declinedPromotions: [{to: "team", why: …}]` so the ceiling is visible in the artifact.
+
+**What it can and cannot produce.** A team clause proposed this way is `status: proposed`, exactly like
+every other proposal: it cannot decide, cannot be matched, and does not render into a prompt until a
+human accepts it in a PR. One host publishes one file, named for that host, and
+[`../ci/check-aggregates.sh`](../ci/check-aggregates.sh) — install it as your corpus repo's CI step or
+pre-commit hook — checks that a file agrees with its own filename and that one commit touches one
+aggregate. That buys accident prevention and an audit trail, **not authentication**: anyone with push
+access can commit a file naming any host. What holds is the review gate, which no aggregate can move.
+
+A machine with no push access to the corpus cannot publish, and that is the honest cost of putting the
+evidence in the repo that is already under review rather than inventing a transport for it.
+
+---
+
 ## The BDI model
 
 Each file holds entries of three kinds:

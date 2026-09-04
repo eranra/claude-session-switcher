@@ -35,6 +35,7 @@ import { dataDir, decisionsPath } from '../hooks/paths';
 import { PluginSettings } from '../hooks/settings';
 import { STALE_LOCK_MS } from '../supervisor/store';
 import { AblationReport } from './ablate';
+import { HostAggregate, readAggregates, witnessHostsFor } from './aggregates';
 import { foldCitations, writeCitations } from './citations';
 import {
   BarDistance, Cluster, FoldResult, Lane, Signal, clusterWindow, fold, nudge, pipelineDir,
@@ -107,6 +108,12 @@ export interface RunLine {
     unreplayable: number; calibrated: boolean;
   };
   ceiling: { tier: string; rendered: number; ceiling: number; outcome: string }[];
+  /**
+   * The cross-machine witnesses this run could see. `hosts` counts validated aggregate files;
+   * `rejected` names every file that was refused and why — a `host` field disagreeing with its own
+   * filename is what a forged or mis-copied aggregate looks like, and it must not be silent.
+   */
+  aggregates: { hosts: number; rejected: { file: string; why: string }[] };
   declinedPromotions: { cluster: string; to: string; why: string }[];
   proposals: {
     clauses: {
@@ -168,6 +175,7 @@ function emptyLine(stage: Stage, trigger: Trigger, now: Date): RunLine {
       calibrated: true,
     },
     ceiling: [],
+    aggregates: { hosts: 0, rejected: [] },
     declinedPromotions: [],
     proposals: { clauses: [], merges: [], retirements: [], redundancies: [], listings: [] },
     model: { calls: 0 },
@@ -335,6 +343,17 @@ export interface ProposeOptions {
   instructionText?: string;
   /** Skip the writes. `learn --dry-run`. */
   dryRun?: boolean;
+  /**
+   * Every label this machine could have published under (`aggregates.ts`'s `hostLabel`, pseudonym and
+   * raw). Supplied by the caller, because the pseudonym needs the per-machine export key and this
+   * module has no business holding one.
+   *
+   * **Absent means no team tier is attempted at all.** A run that cannot say who it is cannot tell
+   * this machine's own published aggregate apart from another developer's, and mistaking one for the
+   * other is precisely the failure the per-host rule exists to prevent. Fail closed: the shape is
+   * still proposed at project or user tier, and the run line says team was declined and why.
+   */
+  selfHosts?: readonly string[];
 }
 
 export interface ProposeResult {
@@ -393,13 +412,23 @@ export function propose(opts: ProposeOptions): ProposeResult {
     // Two lanes, two support sets, one clustering pass each (§4.7). The shapes are identical — every
     // record lands in every shape it touches either way — so `clusters.total` is the same number for
     // both and is not double-counted; what differs is which records count as *evidence*.
-    const greenLane = collectCandidates(clusters, line, opts, 'green');
+    // The published witnesses, read once for the whole run. A refused file is *reported*, not
+    // swallowed: a witness that silently stopped counting and a witness that was never there are
+    // otherwise the same observation, and a `host` field that disagrees with its filename is the
+    // shape a forged or mis-copied aggregate takes.
+    const aggregates = opts.selfHosts === undefined
+      ? { aggregates: [], rejected: [] }
+      : readAggregates(opts.corpusRoot);
+    line.aggregates = { hosts: aggregates.aggregates.length, rejected: aggregates.rejected };
+
+    const greenLane = collectCandidates(clusters, line, opts, 'green', aggregates.aggregates);
     // A green already says "this is allowed"; a yellow on the same shape would say "ask about it"
     // in the same run, which is a corpus contradicting itself in one commit. The green wins: it is
     // the lane with the stronger evidence bar (an `allow` on every supporting record).
     const claimed = new Set(greenLane.map(c => c.cluster));
     const gapLane = collectCandidates(
-      clusterWindow(usable, 'gap').filter(c => !claimed.has(c.key)), line, opts, 'gap');
+      clusterWindow(usable, 'gap').filter(c => !claimed.has(c.key)), line, opts, 'gap',
+      aggregates.aggregates);
     const candidates = [...greenLane, ...gapLane];
     line.candidates.considered = candidates.length;
 
@@ -551,6 +580,7 @@ function describeWindow(line: RunLine, records: DecisionRecord[], env?: NodeJS.P
 
 function collectCandidates(
   clusters: readonly Cluster[], line: RunLine, opts: ProposeOptions, lane: Lane = 'green',
+  published: readonly HostAggregate[] = [],
 ): Candidate[] {
   const out: Candidate[] = [];
   // Refusals a human could still write the rule for by hand — the shape is real, the machine just has
@@ -558,9 +588,18 @@ function collectCandidates(
   // because the tree it describes is not the tree it looks like, which is not advice to hand a human.
   const proseOnly = new Set<RefusalReason>(
     ['no-matcher-shape', 'prefix-too-short', 'path-below-floor']);
+  // A caller that did not say who this machine is gets no aggregates at all — see
+  // `ProposeOptions.selfHosts` for why that is the fail-closed answer.
+  const selfHosts = opts.selfHosts ?? null;
   for (const cluster of clusters) {
     const support = supportOf(cluster);
-    const { tier, distances, declinedTeam } = tierFor(support, Boolean(opts.settings.project));
+    const witnesses = selfHosts === null
+      ? []
+      : witnessHostsFor(cluster.shape12, published, selfHosts);
+    const { tier, distances, declinedTeam } = tierFor(support, Boolean(opts.settings.project), {
+      hasSlug: Boolean(opts.settings.team),
+      witnessHosts: witnesses.length,
+    });
     if (tier === null) {
       line.clusters.belowFloor += 1;
       line.belowFloor.push({ cluster: cluster.key, distances });
@@ -569,13 +608,14 @@ function collectCandidates(
       lane,
       projectSlug: opts.settings.project,
       userSlug: opts.settings.user ?? '',
+      teamSlug: opts.settings.team,
+      witnessHosts: witnesses,
       windowRotated: line.window.rotated,
       instructionText: opts.instructionText,
     });
-    if (result.declinedTeam) {
+    if (result.declinedTeam !== null) {
       line.declinedPromotions.push({
-        cluster: cluster.key, to: 'team',
-        why: 'no cross-user evidence in a single-machine corpus',
+        cluster: cluster.key, to: 'team', why: result.declinedTeam,
       });
     }
     if (result.refusal !== null) {

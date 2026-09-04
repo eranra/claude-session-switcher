@@ -81,6 +81,7 @@ exports.learnedClausePath = learnedClausePath;
 exports.isSafeId = isSafeId;
 exports.readLearnedDir = readLearnedDir;
 exports.assertWritable = assertWritable;
+exports.assertAggregateWritable = assertAggregateWritable;
 exports.realpathOf = realpathOf;
 exports.compareLadder = compareLadder;
 exports.sortByLadder = sortByLadder;
@@ -805,6 +806,40 @@ function assertWritable(corpusRoot, target, id) {
     }
     if (parts[5] !== `${id}.md`) {
         refuse(`the filename must be \`${id}.md\`, so the path can never disagree with the citable id`);
+    }
+}
+/**
+ * The other thing the pipeline may write: this machine's own cross-machine aggregate, and only its
+ * own (`policy/aggregates.ts`).
+ *
+ * Same three losses as {@link assertWritable}, checked the same way and for the same reason — the
+ * path carries the authority, so it is an enforced invariant rather than a convention. The fourth
+ * check is the one specific to this file: **the filename must be `<host>.json` for the host label
+ * being published.** That is what makes "one host, one file" a property of the write rather than a
+ * habit of the caller, and it is what a reviewer and `ci/check-aggregates.sh` both rely on to know
+ * whose counts they are reading. It does not authenticate anybody: see that module's header.
+ */
+function assertAggregateWritable(corpusRoot, target, host) {
+    const refuse = (why) => {
+        throw new Error(`refusing to write ${JSON.stringify(target)}: ${why}`);
+    };
+    if (!/^[a-z0-9][a-z0-9._-]*$/.test(host) || host.includes('..') || host.length > 64) {
+        refuse(`unsafe host label ${JSON.stringify(host)}`);
+    }
+    const root = realpathOf(path.resolve(corpusRoot));
+    const resolved = realpathOf(path.resolve(target));
+    const rel = path.relative(root, resolved);
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+        refuse(`it resolves to ${JSON.stringify(resolved)}, outside the configured corpus root `
+            + `${JSON.stringify(root)}`);
+    }
+    const parts = rel.split(path.sep);
+    // data / aggregates / <host>.json
+    if (parts.length !== 3 || parts[0] !== 'data' || parts[1] !== 'aggregates') {
+        refuse('only `data/aggregates/<host>.json` is writable');
+    }
+    if (parts[2] !== `${host}.json`) {
+        refuse(`the filename must be \`${host}.json\`, so one host can only ever write one file`);
     }
 }
 /**

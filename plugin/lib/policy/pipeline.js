@@ -82,6 +82,7 @@ const trail_1 = require("../audit/trail");
 const permissionRequest_1 = require("../hooks/permissionRequest");
 const paths_1 = require("../hooks/paths");
 const store_1 = require("../supervisor/store");
+const aggregates_1 = require("./aggregates");
 const citations_1 = require("./citations");
 const mine_1 = require("./mine");
 const propose_1 = require("./propose");
@@ -124,6 +125,7 @@ function emptyLine(stage, trigger, now) {
             calibrated: true,
         },
         ceiling: [],
+        aggregates: { hosts: 0, rejected: [] },
         declinedPromotions: [],
         proposals: { clauses: [], merges: [], retirements: [], redundancies: [], listings: [] },
         model: { calls: 0 },
@@ -312,12 +314,20 @@ function propose(opts) {
         // Two lanes, two support sets, one clustering pass each (§4.7). The shapes are identical — every
         // record lands in every shape it touches either way — so `clusters.total` is the same number for
         // both and is not double-counted; what differs is which records count as *evidence*.
-        const greenLane = collectCandidates(clusters, line, opts, 'green');
+        // The published witnesses, read once for the whole run. A refused file is *reported*, not
+        // swallowed: a witness that silently stopped counting and a witness that was never there are
+        // otherwise the same observation, and a `host` field that disagrees with its filename is the
+        // shape a forged or mis-copied aggregate takes.
+        const aggregates = opts.selfHosts === undefined
+            ? { aggregates: [], rejected: [] }
+            : (0, aggregates_1.readAggregates)(opts.corpusRoot);
+        line.aggregates = { hosts: aggregates.aggregates.length, rejected: aggregates.rejected };
+        const greenLane = collectCandidates(clusters, line, opts, 'green', aggregates.aggregates);
         // A green already says "this is allowed"; a yellow on the same shape would say "ask about it"
         // in the same run, which is a corpus contradicting itself in one commit. The green wins: it is
         // the lane with the stronger evidence bar (an `allow` on every supporting record).
         const claimed = new Set(greenLane.map(c => c.cluster));
-        const gapLane = collectCandidates((0, mine_1.clusterWindow)(usable, 'gap').filter(c => !claimed.has(c.key)), line, opts, 'gap');
+        const gapLane = collectCandidates((0, mine_1.clusterWindow)(usable, 'gap').filter(c => !claimed.has(c.key)), line, opts, 'gap', aggregates.aggregates);
         const candidates = [...greenLane, ...gapLane];
         line.candidates.considered = candidates.length;
         const admitted = validate(candidates, records, opts.corpus, line);
@@ -467,15 +477,24 @@ function describeWindow(line, records, env) {
     }
 }
 // --------------------------------------------------------------------------- gating and validation
-function collectCandidates(clusters, line, opts, lane = 'green') {
+function collectCandidates(clusters, line, opts, lane = 'green', published = []) {
     const out = [];
     // Refusals a human could still write the rule for by hand — the shape is real, the machine just has
     // nothing safe to emit about it. `path-symlinked` is deliberately NOT here: that cluster is refused
     // because the tree it describes is not the tree it looks like, which is not advice to hand a human.
     const proseOnly = new Set(['no-matcher-shape', 'prefix-too-short', 'path-below-floor']);
+    // A caller that did not say who this machine is gets no aggregates at all — see
+    // `ProposeOptions.selfHosts` for why that is the fail-closed answer.
+    const selfHosts = opts.selfHosts ?? null;
     for (const cluster of clusters) {
         const support = (0, mine_1.supportOf)(cluster);
-        const { tier, distances, declinedTeam } = (0, mine_1.tierFor)(support, Boolean(opts.settings.project));
+        const witnesses = selfHosts === null
+            ? []
+            : (0, aggregates_1.witnessHostsFor)(cluster.shape12, published, selfHosts);
+        const { tier, distances, declinedTeam } = (0, mine_1.tierFor)(support, Boolean(opts.settings.project), {
+            hasSlug: Boolean(opts.settings.team),
+            witnessHosts: witnesses.length,
+        });
         if (tier === null) {
             line.clusters.belowFloor += 1;
             line.belowFloor.push({ cluster: cluster.key, distances });
@@ -484,13 +503,14 @@ function collectCandidates(clusters, line, opts, lane = 'green') {
             lane,
             projectSlug: opts.settings.project,
             userSlug: opts.settings.user ?? '',
+            teamSlug: opts.settings.team,
+            witnessHosts: witnesses,
             windowRotated: line.window.rotated,
             instructionText: opts.instructionText,
         });
-        if (result.declinedTeam) {
+        if (result.declinedTeam !== null) {
             line.declinedPromotions.push({
-                cluster: cluster.key, to: 'team',
-                why: 'no cross-user evidence in a single-machine corpus',
+                cluster: cluster.key, to: 'team', why: result.declinedTeam,
             });
         }
         if (result.refusal !== null) {

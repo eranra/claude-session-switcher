@@ -694,25 +694,68 @@ export function supportOfStat(stat: ShapeStat): Support {
  * `proposed` clause is the cheapest false positive in the system, while a wrong project clause is
  * read and cited by people who never saw the evidence.
  *
- * `team` is never returned. `DecisionRecord` has no user field and one `dataDir` is one machine and
- * one user, so from a single laptop "two developers agreed" is not a measurable proposition at any
- * threshold. The caller records a `declinedPromotions` entry so the ceiling is visible rather than
- * mysterious.
+ * `team` is returned **only** when the caller supplies cross-host evidence, because `DecisionRecord`
+ * has no user field and one `dataDir` is one machine and one user: from a single laptop "two
+ * developers agreed" is not a measurable proposition at any threshold. `aggregates.ts` is the only
+ * thing that makes it measurable, and it does so by counting *hosts that each independently cleared
+ * the whole user row* — never by summing anyone's counts. With no aggregates published,
+ * `team.witnessHosts` is 0, this function behaves exactly as it did before, and the caller records a
+ * `declinedPromotions` entry so the ceiling stays visible rather than mysterious.
+ *
+ * Team is checked **first**, which is not a break with "narrowest wins": the team row is strictly
+ * higher than the project row on every count (12 > 8, 8 > 5, 14 > 7, identical confinement) *and*
+ * adds a bar no single machine can reach. A shape that clears it is not promoted on weaker evidence —
+ * it is written at the tier its evidence actually came from. What team tier does **not** get is any
+ * shortcut around the widening asymmetry: what it produces is a `status: proposed` file like every
+ * other tier, and no aggregate can change that.
  */
-export function tierFor(support: Support, hasProjectSlug: boolean): {
-  tier: 'user' | 'project' | null;
+export interface TeamEvidence {
+  /** True when a team slug is configured. Without one there is no scope directory to write into. */
+  hasSlug: boolean;
+  /** Other hosts whose published row independently cleared the whole `user` row. Never a sum. */
+  witnessHosts: number;
+}
+
+const NO_TEAM: TeamEvidence = { hasSlug: false, witnessHosts: 0 };
+
+export function tierFor(
+  support: Support, hasProjectSlug: boolean, team: TeamEvidence = NO_TEAM,
+): {
+  tier: 'user' | 'project' | 'team' | null;
   distances: BarDistance[];
-  declinedTeam: boolean;
+  /** Why team was not chosen, when its counts were there for the taking. Null when it was not close. */
+  declinedTeam: string | null;
 } {
   const user = distanceFrom('user', support);
   const project = distanceFrom('project', support);
-  const team = distanceFrom('team', support);
-  const distances = [user, project, team];
+  const teamBar = distanceFrom('team', support);
+  const distances = [user, project, teamBar];
 
-  // Recorded even though `team` can never be returned: a candidate whose *evidence* clears the team
-  // row and is held back only by the missing second host is the case a reader most needs named, and
-  // the `hosts` column is the one bar no single-machine trail can speak to at all.
-  const declinedTeam = team.occurrences >= 0 && team.sessions >= 0 && team.days >= 0;
+  // The proposing host counts as one witness: clearing the team row implies clearing every bar the
+  // user row has, so its own witness test is satisfied by construction rather than by assumption.
+  const wanted = THRESHOLDS.team.hosts;
+  const hosts = team.witnessHosts + 1;
+  const enough = hosts >= wanted;
+  if (teamBar.clears && team.hasSlug && enough) {
+    return { tier: 'team', distances, declinedTeam: null };
+  }
+
+  // Recorded whenever the *counts* were there: a candidate held back only by a missing second host is
+  // the case a reader most needs named, and `hosts` is the one bar no single-machine trail can speak
+  // to at all. Which prerequisite was missing is reported, because "declined" with no reason makes a
+  // misconfigured team slug look identical to a genuinely solo corpus.
+  let declinedTeam: string | null = null;
+  if (teamBar.occurrences >= 0 && teamBar.sessions >= 0 && teamBar.days >= 0) {
+    if (!enough) {
+      declinedTeam = team.witnessHosts === 0
+        ? 'no cross-user evidence in a single-machine corpus'
+        : `only ${hosts} of ${wanted} hosts independently cleared the user row`;
+    } else if (!team.hasSlug) {
+      declinedTeam = 'no team slug configured, so there is no team scope to write into';
+    } else {
+      declinedTeam = 'the team row needs 90% confinement to one working directory';
+    }
+  }
 
   if (hasProjectSlug && project.clears) { return { tier: 'project', distances, declinedTeam }; }
   if (user.clears) { return { tier: 'user', distances, declinedTeam }; }
